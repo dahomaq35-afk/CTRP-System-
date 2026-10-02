@@ -1,20 +1,16 @@
-import re
 import sqlite3
+import copy
 import discord
 
 from discord import app_commands
 from discord.ext import commands
 
+
 DB_FILE = "ctrp_system.db"
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-VALID_NAME = re.compile(r"^[a-z0-9_-]{1,32}$", re.IGNORECASE)
 
 
 class Shortcuts(commands.Cog):
+
     def __init__(self, bot):
         self.bot = bot
         self.dynamic_commands = {}
@@ -29,58 +25,101 @@ class Shortcuts(commands.Cog):
         con.row_factory = sqlite3.Row
         return con
 
-    def get_saved(self, guild_id, command_name):
-        con = self.get_db()
-
-        row = con.execute(
-            """
-            SELECT shortcut1, shortcut2, shortcut3
-            FROM command_shortcuts
-            WHERE guild_id = ?
-            AND command_name = ?
-            """,
-            (guild_id, command_name)
-        ).fetchone()
-
-        con.close()
-        return row
-
     # =====================================================
-    # COMMAND DISCOVERY
+    # GET ORIGINAL COMMAND
     # =====================================================
 
-    def get_all_commands(self):
-        commands_list = []
+    def get_original_command(self, name):
+        name = name.strip().lower().lstrip("/")
 
-        # أوامر البوت العامة
         for command in self.bot.tree.get_commands():
-            if isinstance(command, app_commands.Command):
-                commands_list.append(command)
 
-        # إزالة التكرار
-        result = {}
-        for command in commands_list:
-            result[command.name] = command
+            if not isinstance(command, app_commands.Command):
+                continue
 
-        return list(result.values())
-
-    def find_command(self, name):
-        for command in self.get_all_commands():
-            if command.name == name:
+            if command.name.lower() == name:
                 return command
 
         return None
 
     # =====================================================
-    # REMOVE ONLY ONE COMMAND'S SHORTCUTS
+    # NORMALIZE SHORTCUT
     # =====================================================
 
-    def remove_command_shortcuts(self, guild, command_name):
-        key = (guild.id, command_name)
+    def normalize_shortcut(self, value):
 
-        old_commands = self.dynamic_commands.get(key, [])
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        # المستخدم يقدر يكتب:
+        # تايم
+        # /تايم
+        #
+        # وفي الحالتين نخزن:
+        # تايم
+
+        if value.startswith("/"):
+            value = value[1:]
+
+        value = value.strip().lower()
+
+        return value
+
+    # =====================================================
+    # VALIDATE SHORTCUT
+    # =====================================================
+
+    def validate_shortcut(self, value):
+
+        if not value:
+            return False, "❌ اكتب اسم الاختصار."
+
+        if len(value) > 32:
+            return False, "❌ الاختصار يجب ألا يتجاوز 32 حرفًا."
+
+        if " " in value:
+            return False, "❌ الاختصار لا يمكن أن يحتوي على مسافات."
+
+        # Discord command names
+        allowed = (
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789"
+            "_-"
+        )
+
+        for char in value:
+            if char not in allowed:
+                return False, (
+                    "❌ اسم الاختصار يجب أن يحتوي على "
+                    "حروف إنجليزية صغيرة أو أرقام أو `_` أو `-`."
+                )
+
+        return True, None
+
+    # =====================================================
+    # REMOVE SHORTCUTS OF ONE COMMAND
+    # =====================================================
+
+    def remove_command_shortcuts(
+        self,
+        guild,
+        command_name
+    ):
+
+        key = (
+            guild.id,
+            command_name
+        )
+
+        old_commands = self.dynamic_commands.get(
+            key,
+            []
+        )
 
         for command in old_commands:
+
             try:
                 self.bot.tree.remove_command(
                     command.name,
@@ -92,83 +131,36 @@ class Shortcuts(commands.Cog):
         self.dynamic_commands[key] = []
 
     # =====================================================
-    # CHECK NAME
-    # =====================================================
-
-    def valid_shortcut(self, name):
-        if not name:
-            return False
-
-        name = name.strip()
-
-        if len(name) > 32:
-            return False
-
-        if " " in name:
-            return False
-
-        return True
-
-    # =====================================================
     # CREATE SHORTCUT
     # =====================================================
 
-    def create_shortcut(self, guild, original, shortcut_name):
+    def create_shortcut(
+        self,
+        original,
+        shortcut_name
+    ):
 
-        async def callback(interaction: discord.Interaction, **kwargs):
+        # نسخ الأمر الأصلي بالكامل
+        shortcut = copy.copy(original)
 
-            try:
-                # نستخدم الأمر الأصلي مباشرة
-                namespace = app_commands.Namespace(
-                    interaction,
-                    **kwargs
-                )
+        # نسخ الـ parameters حتى ما نعدل الأصل
+        try:
+            shortcut._params = original._params.copy()
+        except Exception:
+            pass
 
-                await original._invoke_with_namespace(
-                    interaction,
-                    namespace
-                )
+        # اسم الاختصار
+        shortcut.name = shortcut_name
 
-            except Exception as e:
-                print(
-                    f"❌ Shortcut error "
-                    f"{shortcut_name} -> {original.name}: {e}"
-                )
-
-                if interaction.response.is_done():
-                    await interaction.followup.send(
-                        "❌ حدث خطأ أثناء تنفيذ الأمر.",
-                        ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "❌ حدث خطأ أثناء تنفيذ الأمر.",
-                        ephemeral=True
-                    )
-
-        # إنشاء أمر جديد
-        command = app_commands.Command(
-            name=shortcut_name,
-            description=f"اختصار للأمر /{original.name}",
-            callback=callback
+        # وصف الاختصار
+        shortcut.description = (
+            f"اختصار للأمر /{original.name}"
         )
 
-        # نسخ خيارات الأمر الأصلي
-        try:
-            command._params = original._params.copy()
-        except Exception:
-            pass
-
-        # نسخ الإعدادات المهمة
-        try:
-            command._guild_ids = [guild.id]
-        except Exception:
-            pass
-
-        return command
+        return shortcut
 
     # =====================================================
-    # LOAD SHORTCUTS
+    # LOAD ONE GUILD
     # =====================================================
 
     async def load_guild_shortcuts(self, guild):
@@ -177,7 +169,11 @@ class Shortcuts(commands.Cog):
 
         rows = con.execute(
             """
-            SELECT command_name, shortcut1, shortcut2, shortcut3
+            SELECT
+                command_name,
+                shortcut1,
+                shortcut2,
+                shortcut3
             FROM command_shortcuts
             WHERE guild_id = ?
             """,
@@ -188,12 +184,12 @@ class Shortcuts(commands.Cog):
 
         for row in rows:
 
-            original = self.find_command(row["command_name"])
+            original = self.get_original_command(
+                row["command_name"]
+            )
 
             if not original:
                 continue
-
-            key = (guild.id, original.name)
 
             self.remove_command_shortcuts(
                 guild,
@@ -202,27 +198,32 @@ class Shortcuts(commands.Cog):
 
             created = []
 
-            for shortcut in (
+            for shortcut_name in (
                 row["shortcut1"],
                 row["shortcut2"],
                 row["shortcut3"]
             ):
 
-                if not shortcut:
+                if not shortcut_name:
                     continue
 
-                shortcut = shortcut.strip()
+                shortcut_name = self.normalize_shortcut(
+                    shortcut_name
+                )
 
-                if not self.valid_shortcut(shortcut):
+                valid, error = self.validate_shortcut(
+                    shortcut_name
+                )
+
+                if not valid:
                     continue
 
-                # لا تسمح باختصار بنفس اسم الأمر
-                if shortcut == original.name:
+                if shortcut_name == original.name:
                     continue
 
-                # لا تضيف إذا الاسم مستخدم مسبقًا
+                # إذا كان الاسم مستخدمًا في أمر آخر
                 existing = self.bot.tree.get_command(
-                    shortcut,
+                    shortcut_name,
                     guild=guild
                 )
 
@@ -230,43 +231,50 @@ class Shortcuts(commands.Cog):
                     continue
 
                 try:
-                    command = self.create_shortcut(
-                        guild,
+
+                    shortcut = self.create_shortcut(
                         original,
-                        shortcut
+                        shortcut_name
                     )
 
                     self.bot.tree.add_command(
-                        command,
+                        shortcut,
                         guild=guild,
                         override=True
                     )
 
-                    created.append(command)
+                    created.append(shortcut)
 
                     print(
-                        f"🔗 Shortcut loaded: "
-                        f"/{shortcut} -> /{original.name}"
+                        f"🔗 Loaded: "
+                        f"/{shortcut_name} -> "
+                        f"/{original.name}"
                     )
 
                 except Exception as e:
+
                     print(
-                        f"❌ Failed shortcut "
-                        f"/{shortcut}: {e}"
+                        f"❌ Shortcut error "
+                        f"/{shortcut_name}: {e}"
                     )
 
-            self.dynamic_commands[key] = created
+            self.dynamic_commands[
+                (guild.id, original.name)
+            ] = created
 
         try:
-            await self.bot.tree.sync(guild=guild)
+            await self.bot.tree.sync(
+                guild=guild
+            )
         except Exception as e:
+
             print(
                 f"❌ Shortcut sync error "
                 f"{guild.name}: {e}"
             )
 
     # =====================================================
-    # SET COMMAND
+    # SET SHORTCUT
     # =====================================================
 
     @app_commands.command(
@@ -275,7 +283,7 @@ class Shortcuts(commands.Cog):
     )
     @app_commands.describe(
         command="الأمر الأساسي",
-        shortcut1="الاختصار الأول - إجباري",
+        shortcut1="الاختصار الأول",
         shortcut2="الاختصار الثاني - اختياري",
         shortcut3="الاختصار الثالث - اختياري"
     )
@@ -291,71 +299,123 @@ class Shortcuts(commands.Cog):
         shortcut3: str = None
     ):
 
-        original = self.find_command(command)
-
-        if not original:
+        if not interaction.guild:
             return await interaction.response.send_message(
-                "❌ هذا الأمر غير موجود في البوت.",
+                "❌ هذا الأمر يعمل داخل السيرفر فقط.",
                 ephemeral=True
             )
 
-        shortcuts = [
+        # إزالة /
+        command = command.strip().lstrip("/").lower()
+
+        original = self.get_original_command(
+            command
+        )
+
+        if not original:
+            return await interaction.response.send_message(
+                f"❌ الأمر `/{command}` غير موجود.",
+                ephemeral=True
+            )
+
+        # =================================================
+        # NORMALIZE
+        # =================================================
+
+        shortcuts = []
+
+        for value in (
             shortcut1,
             shortcut2,
             shortcut3
-        ]
+        ):
 
-        cleaned = []
-
-        for shortcut in shortcuts:
-
-            if not shortcut:
+            if not value:
                 continue
 
-            shortcut = shortcut.strip()
-
-            if not self.valid_shortcut(shortcut):
-                return await interaction.response.send_message(
-                    f"❌ الاختصار `{shortcut}` غير صالح.",
-                    ephemeral=True
-                )
-
-            if shortcut == original.name:
-                return await interaction.response.send_message(
-                    "❌ لا يمكن أن يكون الاختصار نفس اسم الأمر.",
-                    ephemeral=True
-                )
-
-            if shortcut in cleaned:
-                return await interaction.response.send_message(
-                    f"❌ الاختصار `{shortcut}` مكرر.",
-                    ephemeral=True
-                )
-
-            cleaned.append(shortcut)
-
-        # التأكد أن الاختصارات غير مستخدمة
-        for shortcut in cleaned:
-
-            existing = self.bot.tree.get_command(
-                shortcut,
-                guild=interaction.guild
+            value = self.normalize_shortcut(
+                value
             )
 
-            if existing and existing.name != shortcut:
+            valid, error = self.validate_shortcut(
+                value
+            )
+
+            if not valid:
                 return await interaction.response.send_message(
-                    f"❌ الاختصار `{shortcut}` مستخدم مسبقًا.",
+                    error,
                     ephemeral=True
                 )
 
-            # حتى لو كان الأمر موجودًا بنفس الاسم
-            if existing:
+            if value == original.name:
                 return await interaction.response.send_message(
-                    f"❌ الأمر `/{shortcut}` موجود مسبقًا.",
+                    "❌ لا يمكن أن يكون الاختصار نفس الأمر.",
                     ephemeral=True
                 )
 
-        # حفظ قاعدة البيانات
+            if value in shortcuts:
+                return await interaction.response.send_message(
+                    f"❌ الاختصار `/{value}` مكرر.",
+                    ephemeral=True
+                )
+
+            shortcuts.append(value)
+
+        if not shortcuts:
+            return await interaction.response.send_message(
+                "❌ لازم تحط اختصار واحد على الأقل.",
+                ephemeral=True
+            )
+
+        # =================================================
+        # CHECK CONFLICTS
+        # =================================================
+
+        reserved = {
+            "حدد_امر",
+            "اختصارات",
+            "حذف_اختصارات"
+        }
+
+        for shortcut_name in shortcuts:
+
+            if shortcut_name in reserved:
+                return await interaction.response.send_message(
+                    f"❌ `/{shortcut_name}` محجوز للنظام.",
+                    ephemeral=True
+                )
+
+            # أمر أساسي موجود
+            existing_global = (
+                self.get_original_command(
+                    shortcut_name
+                )
+            )
+
+            if existing_global:
+                return await interaction.response.send_message(
+                    f"❌ `/{shortcut_name}` مستخدم كأمر موجود مسبقًا.",
+                    ephemeral=True
+                )
+
+            # اختصار موجود في السيرفر
+            existing_guild = (
+                self.bot.tree.get_command(
+                    shortcut_name,
+                    guild=interaction.guild
+                )
+            )
+
+            if existing_guild:
+                return await interaction.response.send_message(
+                    f"❌ `/{shortcut_name}` مستخدم مسبقًا.",
+                    ephemeral=True
+                )
+
+        # =================================================
+        # SAVE DATABASE
+        # =================================================
+
         con = self.get_db()
 
         con.execute(
@@ -379,78 +439,105 @@ class Shortcuts(commands.Cog):
             (
                 interaction.guild.id,
                 original.name,
-                cleaned[0],
-                cleaned[1] if len(cleaned) > 1 else None,
-                cleaned[2] if len(cleaned) > 2 else None
+                shortcuts[0],
+                shortcuts[1]
+                if len(shortcuts) > 1
+                else None,
+                shortcuts[2]
+                if len(shortcuts) > 2
+                else None
             )
         )
 
         con.commit()
         con.close()
 
-        # حذف اختصارات هذا الأمر فقط
+        # =================================================
+        # REMOVE OLD
+        # =================================================
+
         self.remove_command_shortcuts(
             interaction.guild,
             original.name
         )
 
+        # =================================================
+        # ADD NEW
+        # =================================================
+
         created = []
 
-        for shortcut in cleaned:
+        for shortcut_name in shortcuts:
 
             try:
-                dynamic = self.create_shortcut(
-                    interaction.guild,
+
+                shortcut = self.create_shortcut(
                     original,
-                    shortcut
+                    shortcut_name
                 )
 
                 self.bot.tree.add_command(
-                    dynamic,
+                    shortcut,
                     guild=interaction.guild,
                     override=True
                 )
 
-                created.append(dynamic)
+                created.append(shortcut)
 
             except Exception as e:
+
                 print(
-                    f"❌ Failed creating /{shortcut}: {e}"
+                    f"❌ Failed creating "
+                    f"/{shortcut_name}: {e}"
                 )
 
         self.dynamic_commands[
-            (interaction.guild.id, original.name)
+            (
+                interaction.guild.id,
+                original.name
+            )
         ] = created
 
+        # =================================================
+        # SYNC
+        # =================================================
+
         try:
+
             await self.bot.tree.sync(
                 guild=interaction.guild
             )
+
         except Exception as e:
+
             return await interaction.response.send_message(
-                f"⚠️ تم الحفظ لكن حدث خطأ أثناء المزامنة:\n`{e}`",
+                f"❌ حصل خطأ أثناء تحديث أوامر Discord:\n"
+                f"`{e}`",
                 ephemeral=True
             )
 
-        text = (
-            f"**الأمر الأساسي:** `/{original.name}`\n"
-            f"**الاختصارات:**\n"
+        # =================================================
+        # SUCCESS
+        # =================================================
+
+        result = "\n".join(
+            f"• `/{name}`"
+            for name in shortcuts
         )
 
-        for shortcut in cleaned:
-            text += f"• `/{shortcut}`\n"
-
         await interaction.response.send_message(
-            "✅ تم تحديد الاختصارات بنجاح.\n\n" + text
+            f"✅ تم إنشاء اختصارات الأمر `/{original.name}`.\n\n"
+            f"**الاختصارات:**\n"
+            f"{result}"
         )
 
     # =====================================================
-    # SHOW SHORTCUTS
+    # LIST
     # =====================================================
 
     @app_commands.command(
         name="اختصارات",
-        description="عرض اختصارات الأوامر"
+        description="عرض جميع اختصارات الأوامر"
     )
     @app_commands.checks.has_permissions(
         manage_guild=True
@@ -464,7 +551,11 @@ class Shortcuts(commands.Cog):
 
         rows = con.execute(
             """
-            SELECT command_name, shortcut1, shortcut2, shortcut3
+            SELECT
+                command_name,
+                shortcut1,
+                shortcut2,
+                shortcut3
             FROM command_shortcuts
             WHERE guild_id = ?
             ORDER BY command_name
@@ -476,7 +567,7 @@ class Shortcuts(commands.Cog):
 
         if not rows:
             return await interaction.response.send_message(
-                "📭 لا توجد اختصارات محددة.",
+                "📭 لا توجد اختصارات.",
                 ephemeral=True
             )
 
@@ -489,32 +580,38 @@ class Shortcuts(commands.Cog):
 
         for row in rows:
 
-            shortcuts = []
+            names = []
 
             for value in (
                 row["shortcut1"],
                 row["shortcut2"],
                 row["shortcut3"]
             ):
+
                 if value:
-                    shortcuts.append(f"`/{value}`")
+                    names.append(
+                        f"`/{value}`"
+                    )
 
             line = (
                 f"**/{row['command_name']}**\n"
-                f"{' • '.join(shortcuts)}\n\n"
+                f"{' • '.join(names)}\n\n"
             )
 
             if len(text) + len(line) > 3900:
+
                 embed.add_field(
                     name="الأوامر",
                     value=text,
                     inline=False
                 )
+
                 text = ""
 
             text += line
 
         if text:
+
             embed.add_field(
                 name="الأوامر",
                 value=text,
@@ -527,7 +624,7 @@ class Shortcuts(commands.Cog):
         )
 
     # =====================================================
-    # DELETE SHORTCUTS
+    # DELETE
     # =====================================================
 
     @app_commands.command(
@@ -535,7 +632,7 @@ class Shortcuts(commands.Cog):
         description="حذف اختصارات أمر معين"
     )
     @app_commands.describe(
-        command="الأمر الذي تريد حذف اختصاراته"
+        command="الأمر الأساسي"
     )
     @app_commands.checks.has_permissions(
         manage_guild=True
@@ -546,11 +643,20 @@ class Shortcuts(commands.Cog):
         command: str
     ):
 
-        original = self.find_command(command)
+        command = (
+            command
+            .strip()
+            .lstrip("/")
+            .lower()
+        )
+
+        original = self.get_original_command(
+            command
+        )
 
         if not original:
             return await interaction.response.send_message(
-                "❌ هذا الأمر غير موجود.",
+                f"❌ الأمر `/{command}` غير موجود.",
                 ephemeral=True
             )
 
@@ -573,7 +679,7 @@ class Shortcuts(commands.Cog):
 
         if cursor.rowcount == 0:
             return await interaction.response.send_message(
-                "❌ هذا الأمر ليس لديه اختصارات.",
+                "❌ هذا الأمر لا توجد له اختصارات.",
                 ephemeral=True
             )
 
@@ -608,18 +714,20 @@ class Shortcuts(commands.Cog):
         for guild in self.bot.guilds:
 
             try:
-                await self.load_guild_shortcuts(guild)
+
+                await self.load_guild_shortcuts(
+                    guild
+                )
 
             except Exception as e:
+
                 print(
                     f"❌ Failed loading shortcuts "
                     f"for {guild.name}: {e}"
                 )
 
 
-# =========================================================
-# SETUP
-# =========================================================
-
 async def setup(bot):
-    await bot.add_cog(Shortcuts(bot))
+    await bot.add_cog(
+        Shortcuts(bot)
+    )
