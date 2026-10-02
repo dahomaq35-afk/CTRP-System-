@@ -255,7 +255,6 @@ async def get_recent_audit_entry(
         ):
 
             if entry.target and entry.target.id == target_id:
-
                 return entry
 
     except Exception:
@@ -365,37 +364,13 @@ async def on_member_join(member: discord.Member):
 
 
 # =========================================================
-# MEMBER LEAVE / KICK / BAN
+# MEMBER LEAVE / KICK
 # =========================================================
 
 @bot.event
 async def on_member_remove(member: discord.Member):
 
     await asyncio.sleep(1)
-
-    ban_entry = await get_recent_audit_entry(
-        member.guild,
-        discord.AuditLogAction.ban,
-        member.id
-    )
-
-    if ban_entry:
-
-        executor = ban_entry.user
-
-        await send_log(
-            member.guild,
-            "حظر عضو",
-            (
-                f"**العضو:** `{member}`\n"
-                f"**ID:** `{member.id}`\n"
-                f"**بواسطة:** {executor.mention if executor else 'غير معروف'}"
-            ),
-            "🔨",
-            discord.Color.red()
-        )
-
-        return
 
     kick_entry = await get_recent_audit_entry(
         member.guild,
@@ -413,7 +388,8 @@ async def on_member_remove(member: discord.Member):
             (
                 f"**العضو:** `{member}`\n"
                 f"**ID:** `{member.id}`\n"
-                f"**بواسطة:** {executor.mention if executor else 'غير معروف'}"
+                f"**بواسطة:** "
+                f"{executor.mention if executor else 'غير معروف'}"
             ),
             "👢",
             discord.Color.orange()
@@ -532,7 +508,6 @@ async def on_message_edit(
         return
 
     old_content = before.content or "فارغ"
-
     new_content = after.content or "فارغ"
 
     if len(old_content) > 700:
@@ -574,11 +549,7 @@ async def on_guild_channel_create(
         channel.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     await send_log(
         channel.guild,
@@ -611,11 +582,7 @@ async def on_guild_channel_delete(
         channel.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     await send_log(
         channel.guild,
@@ -648,11 +615,7 @@ async def on_guild_role_create(
         role.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     await send_log(
         role.guild,
@@ -685,11 +648,7 @@ async def on_guild_role_delete(
         role.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     await send_log(
         role.guild,
@@ -726,11 +685,7 @@ async def on_guild_role_update(
         after.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     await send_log(
         after.guild,
@@ -773,11 +728,7 @@ async def on_member_update(
         after.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     executor_text = (
         executor.mention
@@ -823,7 +774,7 @@ async def on_member_update(
 
 
 # =========================================================
-# ROLE SELECT VIEW
+# AUTO ROLE SELECT
 # =========================================================
 
 class AutoRoleSelect(discord.ui.RoleSelect):
@@ -844,7 +795,6 @@ class AutoRoleSelect(discord.ui.RoleSelect):
     ):
 
         role = self.values[0]
-
         me = interaction.guild.me
 
         if not me.guild_permissions.manage_roles:
@@ -901,9 +851,7 @@ class AutoRoleView(discord.ui.View):
 
     def __init__(self, role_type: str):
 
-        super().__init__(
-            timeout=60
-        )
+        super().__init__(timeout=60)
 
         self.add_item(
             AutoRoleSelect(role_type)
@@ -911,12 +859,10 @@ class AutoRoleView(discord.ui.View):
 
 
 # =========================================================
-# SET LOG CHANNEL
+# LOG CHANNEL SELECT
 # =========================================================
 
-class LogChannelSelect(
-    discord.ui.ChannelSelect
-):
+class LogChannelSelect(discord.ui.ChannelSelect):
 
     def __init__(self):
 
@@ -952,9 +898,7 @@ class LogChannelView(discord.ui.View):
 
     def __init__(self):
 
-        super().__init__(
-            timeout=60
-        )
+        super().__init__(timeout=60)
 
         self.add_item(
             LogChannelSelect()
@@ -1100,7 +1044,7 @@ async def log_settings(
 
 
 # =========================================================
-# WARNING LOG WATCHER
+# WARNING LOG SYSTEM
 # =========================================================
 
 last_warning_id = {}
@@ -1127,90 +1071,97 @@ def prepare_warning_ids():
         ] = row["max_id"] or 0
 
 
-async def warning_watcher():
+@tasks.loop(seconds=5)
+async def warning_watcher_task():
 
-    await bot.wait_until_ready()
+    try:
 
-    while not bot.is_closed():
+        con = db()
 
-        try:
+        rows = con.execute(
+            """
+            SELECT *
+            FROM warnings
+            WHERE id > ?
+            ORDER BY id ASC
+            """,
+            (
+                min(last_warning_id.values())
+                if last_warning_id
+                else 0,
+            )
+        ).fetchall()
 
-            con = db()
+        con.close()
 
-            rows = con.execute(
-                """
-                SELECT *
-                FROM warnings
-                ORDER BY id ASC
-                """
-            ).fetchall()
+        for row in rows:
 
-            con.close()
+            guild_id = row["guild_id"]
+            warning_id = row["id"]
 
-            for row in rows:
-
-                guild_id = row["guild_id"]
-                warning_id = row["id"]
-
-                old_id = last_warning_id.get(
-                    guild_id,
-                    0
-                )
-
-                if warning_id <= old_id:
-                    continue
-
-                last_warning_id[
-                    guild_id
-                ] = warning_id
-
-                guild = bot.get_guild(
-                    guild_id
-                )
-
-                if not guild:
-                    continue
-
-                user = guild.get_member(
-                    row["user_id"]
-                )
-
-                moderator = guild.get_member(
-                    row["moderator_id"]
-                )
-
-                user_text = (
-                    user.mention
-                    if user
-                    else f"`{row['user_id']}`"
-                )
-
-                moderator_text = (
-                    moderator.mention
-                    if moderator
-                    else f"`{row['moderator_id']}`"
-                )
-
-                await send_log(
-                    guild,
-                    "تحذير عضو",
-                    (
-                        f"**العضو:** {user_text}\n"
-                        f"**بواسطة:** {moderator_text}\n"
-                        f"**السبب:** "
-                        f"`{row['reason'] or 'بدون سبب'}`"
-                    ),
-                    "⚠️",
-                    discord.Color.orange()
-                )
-
-        except Exception as e:
-
-            print(
-                f"❌ Warning Watcher Error: {e}"
+            old_id = last_warning_id.get(
+                guild_id,
+                0
             )
 
-        await asyncio.sleep(5)
+            if warning_id <= old_id:
+                continue
+
+            last_warning_id[
+                guild_id
+            ] = warning_id
+
+            guild = bot.get_guild(
+                guild_id
+            )
+
+            if not guild:
+                continue
+
+            user = guild.get_member(
+                row["user_id"]
+            )
+
+            moderator = guild.get_member(
+                row["moderator_id"]
+            )
+
+            user_text = (
+                user.mention
+                if user
+                else f"`{row['user_id']}`"
+            )
+
+            moderator_text = (
+                moderator.mention
+                if moderator
+                else f"`{row['moderator_id']}`"
+            )
+
+            await send_log(
+                guild,
+                "تحذير عضو",
+                (
+                    f"**العضو:** {user_text}\n"
+                    f"**بواسطة:** {moderator_text}\n"
+                    f"**السبب:** "
+                    f"`{row['reason'] or 'بدون سبب'}`"
+                ),
+                "⚠️",
+                discord.Color.orange()
+            )
+
+    except Exception as e:
+
+        print(
+            f"❌ Warning Watcher Error: {e}"
+        )
+
+
+@warning_watcher_task.before_loop
+async def before_warning_watcher():
+
+    await bot.wait_until_ready()
 
 
 # =========================================================
@@ -1310,16 +1261,6 @@ async def main():
         warning_watcher_task.start()
 
     await bot.start(TOKEN)
-
-
-# =========================================================
-# WARNING TASK
-# =========================================================
-
-warning_watcher_task = tasks.Loop(
-    warning_watcher,
-    seconds=5
-)
 
 
 # =========================================================
