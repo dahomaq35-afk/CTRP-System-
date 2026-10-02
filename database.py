@@ -12,7 +12,10 @@ def get_db():
 def init_db():
     con = get_db()
 
+    # =====================================================
     # إعدادات السيرفر
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             guild_id INTEGER PRIMARY KEY,
@@ -24,7 +27,36 @@ def init_db():
         )
     """)
 
+    # =====================================================
+    # لوقات السيرفر - كل قسم له روم مستقل
+    # =====================================================
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS log_settings (
+            guild_id INTEGER PRIMARY KEY,
+
+            member_log INTEGER,
+            role_log INTEGER,
+            message_log INTEGER,
+            channel_log INTEGER,
+            warning_log INTEGER,
+
+            ticket_log INTEGER,
+            application_log INTEGER,
+            moderation_log INTEGER,
+            suggestion_log INTEGER,
+            notification_log INTEGER,
+
+            voice_log INTEGER,
+            level_log INTEGER,
+            points_log INTEGER
+        )
+    """)
+
+    # =====================================================
     # الردود التلقائية
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS replies (
             guild_id INTEGER,
@@ -34,7 +66,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # الرتب الذاتية
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS self_roles (
             guild_id INTEGER,
@@ -43,7 +78,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # التحذيرات
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +93,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # النقاط
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS points (
             guild_id INTEGER,
@@ -65,7 +106,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # القوانين
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS laws (
             guild_id INTEGER,
@@ -76,7 +120,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # التقديمات
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +136,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # إشعارات المنصات
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS streamers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +154,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # نظام اللفلات
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS levels (
             guild_id INTEGER,
@@ -117,7 +170,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # إعدادات اللفلات
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS level_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -128,7 +184,10 @@ def init_db():
         )
     """)
 
+    # =====================================================
     # اختصارات الأوامر
+    # =====================================================
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS command_shortcuts (
             guild_id INTEGER,
