@@ -1,18 +1,14 @@
 import sqlite3
-
 DB_FILE = "ctrp_system.db"
-
-
 def get_db():
     con = sqlite3.connect(DB_FILE)
     con.row_factory = sqlite3.Row
     return con
-
-
 def init_db():
     con = get_db()
-
+    # =========================
     # إعدادات السيرفر
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             guild_id INTEGER PRIMARY KEY,
@@ -23,8 +19,9 @@ def init_db():
             auto_bot_role INTEGER
         )
     """)
-
+    # =========================
     # الردود التلقائية
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS replies (
             guild_id INTEGER,
@@ -33,8 +30,9 @@ def init_db():
             PRIMARY KEY (guild_id, trigger)
         )
     """)
-
+    # =========================
     # الرتب الذاتية
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS self_roles (
             guild_id INTEGER,
@@ -42,8 +40,9 @@ def init_db():
             PRIMARY KEY (guild_id, role_id)
         )
     """)
-
+    # =========================
     # التحذيرات
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,8 +53,9 @@ def init_db():
             created_at TEXT
         )
     """)
-
+    # =========================
     # النقاط
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS points (
             guild_id INTEGER,
@@ -64,8 +64,9 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
-
+    # =========================
     # القوانين
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS laws (
             guild_id INTEGER,
@@ -75,8 +76,9 @@ def init_db():
             PRIMARY KEY (guild_id, number)
         )
     """)
-
+    # =========================
     # التقديمات
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,8 +90,9 @@ def init_db():
             created_at TEXT
         )
     """)
-
-    # إشعارات Twitch / Kick / YouTube / TikTok
+    # =========================
+    # إشعارات المنصات
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS streamers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,11 +106,9 @@ def init_db():
             UNIQUE (guild_id, platform, username)
         )
     """)
-
     # =========================
     # نظام اللفلات
     # =========================
-
     con.execute("""
         CREATE TABLE IF NOT EXISTS levels (
             guild_id INTEGER,
@@ -119,8 +120,9 @@ def init_db():
             PRIMARY KEY (guild_id, user_id)
         )
     """)
-
-    # إعدادات نظام اللفلات
+    # =========================
+    # إعدادات اللفلات
+    # =========================
     con.execute("""
         CREATE TABLE IF NOT EXISTS level_settings (
             guild_id INTEGER PRIMARY KEY,
@@ -130,6 +132,18 @@ def init_db():
             levelup_message TEXT DEFAULT 'مبروك {user} 🎉 وصلت للمستوى {level}!'
         )
     """)
-
+    # =========================
+    # اختصارات الأوامر
+    # =========================
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS command_shortcuts (
+            guild_id INTEGER,
+            command_name TEXT,
+            shortcut1 TEXT NOT NULL,
+            shortcut2 TEXT,
+            shortcut3 TEXT,
+            PRIMARY KEY (guild_id, command_name)
+        )
+    """)
     con.commit()
     con.close()
