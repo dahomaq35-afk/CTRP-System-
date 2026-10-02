@@ -1,350 +1,86 @@
+import re
+import sqlite3
 import discord
+
 from discord import app_commands
 from discord.ext import commands
-import sqlite3
-from datetime import timedelta
+
 DB_FILE = "ctrp_system.db"
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+VALID_NAME = re.compile(r"^[a-z0-9_-]{1,32}$", re.IGNORECASE)
+
+
 class Shortcuts(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.dynamic_commands = {}
-    # =========================================================
+        self.loaded = False
+
+    # =====================================================
     # DATABASE
-    # =========================================================
+    # =====================================================
+
     def get_db(self):
         con = sqlite3.connect(DB_FILE)
         con.row_factory = sqlite3.Row
         return con
-    # =========================================================
-    # الأوامر المدعومة
-    # =========================================================
-    COMMANDS = {
-        "kick": "طرد عضو",
-        "ban": "حظر عضو",
-        "unban": "فك حظر عضو",
-        "timeout": "إعطاء تايم أوت لعضو",
-        "untimeout": "إزالة التايم أوت",
-        "clear": "حذف عدد من الرسائل"
-    }
-    # =========================================================
-    # إنشاء أمر kick
-    # =========================================================
-    def create_kick_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            member: discord.Member,
-            reason: str = "بدون سبب"
-        ):
-            if not interaction.user.guild_permissions.kick_members:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية طرد الأعضاء.",
-                    ephemeral=True
-                )
-            try:
-                await member.kick(
-                    reason=reason
-                )
-                embed = discord.Embed(
-                    title="👢 تم طرد العضو",
-                    description=(
-                        f"**العضو:** {member.mention}\n"
-                        f"**السبب:** {reason}\n"
-                        f"**بواسطة:** {interaction.user.mention}"
-                    ),
-                    color=discord.Color.orange()
-                )
-                await interaction.response.send_message(
-                    embed=embed
-                )
-            except discord.Forbidden:
-                await interaction.response.send_message(
-                    "❌ البوت لا يملك صلاحية طرد هذا العضو.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        command = app_commands.Command(
-            name=name,
-            description="اختصار لأمر طرد عضو",
-            callback=callback
-        )
-        return command
-    # =========================================================
-    # إنشاء أمر ban
-    # =========================================================
-    def create_ban_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            member: discord.Member,
-            reason: str = "بدون سبب"
-        ):
-            if not interaction.user.guild_permissions.ban_members:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية حظر الأعضاء.",
-                    ephemeral=True
-                )
-            try:
-                await member.ban(
-                    reason=reason
-                )
-                embed = discord.Embed(
-                    title="🔨 تم حظر العضو",
-                    description=(
-                        f"**العضو:** {member.mention}\n"
-                        f"**السبب:** {reason}\n"
-                        f"**بواسطة:** {interaction.user.mention}"
-                    ),
-                    color=discord.Color.red()
-                )
-                await interaction.response.send_message(
-                    embed=embed
-                )
-            except discord.Forbidden:
-                await interaction.response.send_message(
-                    "❌ البوت لا يملك صلاحية حظر هذا العضو.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        return app_commands.Command(
-            name=name,
-            description="اختصار لأمر حظر عضو",
-            callback=callback
-        )
-    # =========================================================
-    # إنشاء أمر unban
-    # =========================================================
-    def create_unban_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            user_id: str
-        ):
-            if not interaction.user.guild_permissions.ban_members:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية فك الحظر.",
-                    ephemeral=True
-                )
-            try:
-                user = await self.bot.fetch_user(
-                    int(user_id)
-                )
-                await interaction.guild.unban(
-                    user
-                )
-                await interaction.response.send_message(
-                    f"✅ تم فك الحظر عن **{user}**."
-                )
-            except Exception:
-                await interaction.response.send_message(
-                    "❌ لم أستطع فك الحظر. تأكد من الآيدي.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        return app_commands.Command(
-            name=name,
-            description="اختصار لأمر فك الحظر",
-            callback=callback
-        )
-    # =========================================================
-    # إنشاء أمر timeout
-    # =========================================================
-    def create_timeout_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            member: discord.Member,
-            minutes: int,
-            reason: str = "بدون سبب"
-        ):
-            if not interaction.user.guild_permissions.moderate_members:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية إعطاء تايم أوت.",
-                    ephemeral=True
-                )
-            if minutes < 1 or minutes > 40320:
-                return await interaction.response.send_message(
-                    "❌ المدة يجب أن تكون بين دقيقة و40320 دقيقة.",
-                    ephemeral=True
-                )
-            try:
-                await member.timeout(
-                    timedelta(minutes=minutes),
-                    reason=reason
-                )
-                await interaction.response.send_message(
-                    f"🔇 تم إعطاء {member.mention} تايم أوت لمدة "
-                    f"**{minutes} دقيقة**.\n"
-                    f"**السبب:** {reason}"
-                )
-            except discord.Forbidden:
-                await interaction.response.send_message(
-                    "❌ البوت لا يملك صلاحية إعطاء تايم لهذا العضو.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        return app_commands.Command(
-            name=name,
-            description="اختصار لأمر التايم",
-            callback=callback
-        )
-    # =========================================================
-    # إنشاء أمر untimeout
-    # =========================================================
-    def create_untimeout_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            member: discord.Member
-        ):
-            if not interaction.user.guild_permissions.moderate_members:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية إزالة التايم.",
-                    ephemeral=True
-                )
-            try:
-                await member.timeout(
-                    None
-                )
-                await interaction.response.send_message(
-                    f"🔊 تم إزالة التايم أوت عن {member.mention}."
-                )
-            except discord.Forbidden:
-                await interaction.response.send_message(
-                    "❌ البوت لا يملك الصلاحية.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        return app_commands.Command(
-            name=name,
-            description="اختصار لأمر فك التايم",
-            callback=callback
-        )
-    # =========================================================
-    # إنشاء أمر clear
-    # =========================================================
-    def create_clear_command(self, name):
-        async def callback(
-            interaction: discord.Interaction,
-            amount: int
-        ):
-            if not interaction.user.guild_permissions.manage_messages:
-                return await interaction.response.send_message(
-                    "❌ ما عندك صلاحية حذف الرسائل.",
-                    ephemeral=True
-                )
-            if amount < 1 or amount > 100:
-                return await interaction.response.send_message(
-                    "❌ اختر رقمًا بين 1 و100.",
-                    ephemeral=True
-                )
-            await interaction.response.defer(
-                ephemeral=True
-            )
-            try:
-                deleted = await interaction.channel.purge(
-                    limit=amount
-                )
-                await interaction.followup.send(
-                    f"🧹 تم حذف **{len(deleted)}** رسالة.",
-                    ephemeral=True
-                )
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    "❌ البوت لا يملك صلاحية حذف الرسائل.",
-                    ephemeral=True
-                )
-        callback.__name__ = name
-        return app_commands.Command(
-            name=name,
-            description="اختصار لأمر حذف الرسائل",
-            callback=callback
-        )
-    # =========================================================
-    # إنشاء الاختصار حسب الأمر
-    # =========================================================
-    def build_command(self, command_name, shortcut):
-        if command_name == "kick":
-            return self.create_kick_command(
-                shortcut
-            )
-        if command_name == "ban":
-            return self.create_ban_command(
-                shortcut
-            )
-        if command_name == "unban":
-            return self.create_unban_command(
-                shortcut
-            )
-        if command_name == "timeout":
-            return self.create_timeout_command(
-                shortcut
-            )
-        if command_name == "untimeout":
-            return self.create_untimeout_command(
-                shortcut
-            )
-        if command_name == "clear":
-            return self.create_clear_command(
-                shortcut
-            )
-        return None
-    # =========================================================
-    # تحميل الاختصارات
-    # =========================================================
-    async def load_shortcuts(self, guild):
+
+    def get_saved(self, guild_id, command_name):
         con = self.get_db()
-        rows = con.execute(
+
+        row = con.execute(
             """
-            SELECT *
+            SELECT shortcut1, shortcut2, shortcut3
             FROM command_shortcuts
             WHERE guild_id = ?
+            AND command_name = ?
             """,
-            (
-                guild.id,
-            )
-        ).fetchall()
+            (guild_id, command_name)
+        ).fetchone()
+
         con.close()
-        for row in rows:
-            command_name = row["command_name"]
-            for shortcut in [
-                row["shortcut1"],
-                row["shortcut2"],
-                row["shortcut3"]
-            ]:
-                if not shortcut:
-                    continue
-                command = self.build_command(
-                    command_name,
-                    shortcut
-                )
-                if command is None:
-                    continue
-                try:
-                    self.bot.tree.add_command(
-                        command,
-                        guild=guild,
-                        override=True
-                    )
-                    self.dynamic_commands[
-                        (guild.id, shortcut)
-                    ] = command
-                except Exception as e:
-                    print(
-                        f"❌ Shortcut Error: {shortcut}"
-                    )
-                    print(e)
-    # =========================================================
-    # حذف الاختصارات القديمة
-    # =========================================================
-    async def remove_guild_shortcuts(
-        self,
-        guild
-    ):
-        keys = [
-            key
-            for key in self.dynamic_commands
-            if key[0] == guild.id
-        ]
-        for key in keys:
-            command = self.dynamic_commands.pop(
-                key
-            )
+        return row
+
+    # =====================================================
+    # COMMAND DISCOVERY
+    # =====================================================
+
+    def get_all_commands(self):
+        commands_list = []
+
+        # أوامر البوت العامة
+        for command in self.bot.tree.get_commands():
+            if isinstance(command, app_commands.Command):
+                commands_list.append(command)
+
+        # إزالة التكرار
+        result = {}
+        for command in commands_list:
+            result[command.name] = command
+
+        return list(result.values())
+
+    def find_command(self, name):
+        for command in self.get_all_commands():
+            if command.name == name:
+                return command
+
+        return None
+
+    # =====================================================
+    # REMOVE ONLY ONE COMMAND'S SHORTCUTS
+    # =====================================================
+
+    def remove_command_shortcuts(self, guild, command_name):
+        key = (guild.id, command_name)
+
+        old_commands = self.dynamic_commands.get(key, [])
+
+        for command in old_commands:
             try:
                 self.bot.tree.remove_command(
                     command.name,
@@ -352,12 +88,190 @@ class Shortcuts(commands.Cog):
                 )
             except Exception:
                 pass
-    # =========================================================
-    # /حدد_امر
-    # =========================================================
+
+        self.dynamic_commands[key] = []
+
+    # =====================================================
+    # CHECK NAME
+    # =====================================================
+
+    def valid_shortcut(self, name):
+        if not name:
+            return False
+
+        name = name.strip()
+
+        if len(name) > 32:
+            return False
+
+        if " " in name:
+            return False
+
+        return True
+
+    # =====================================================
+    # CREATE SHORTCUT
+    # =====================================================
+
+    def create_shortcut(self, guild, original, shortcut_name):
+
+        async def callback(interaction: discord.Interaction, **kwargs):
+
+            try:
+                # نستخدم الأمر الأصلي مباشرة
+                namespace = app_commands.Namespace(
+                    interaction,
+                    **kwargs
+                )
+
+                await original._invoke_with_namespace(
+                    interaction,
+                    namespace
+                )
+
+            except Exception as e:
+                print(
+                    f"❌ Shortcut error "
+                    f"{shortcut_name} -> {original.name}: {e}"
+                )
+
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "❌ حدث خطأ أثناء تنفيذ الأمر.",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ حدث خطأ أثناء تنفيذ الأمر.",
+                        ephemeral=True
+                    )
+
+        # إنشاء أمر جديد
+        command = app_commands.Command(
+            name=shortcut_name,
+            description=f"اختصار للأمر /{original.name}",
+            callback=callback
+        )
+
+        # نسخ خيارات الأمر الأصلي
+        try:
+            command._params = original._params.copy()
+        except Exception:
+            pass
+
+        # نسخ الإعدادات المهمة
+        try:
+            command._guild_ids = [guild.id]
+        except Exception:
+            pass
+
+        return command
+
+    # =====================================================
+    # LOAD SHORTCUTS
+    # =====================================================
+
+    async def load_guild_shortcuts(self, guild):
+
+        con = self.get_db()
+
+        rows = con.execute(
+            """
+            SELECT command_name, shortcut1, shortcut2, shortcut3
+            FROM command_shortcuts
+            WHERE guild_id = ?
+            """,
+            (guild.id,)
+        ).fetchall()
+
+        con.close()
+
+        for row in rows:
+
+            original = self.find_command(row["command_name"])
+
+            if not original:
+                continue
+
+            key = (guild.id, original.name)
+
+            self.remove_command_shortcuts(
+                guild,
+                original.name
+            )
+
+            created = []
+
+            for shortcut in (
+                row["shortcut1"],
+                row["shortcut2"],
+                row["shortcut3"]
+            ):
+
+                if not shortcut:
+                    continue
+
+                shortcut = shortcut.strip()
+
+                if not self.valid_shortcut(shortcut):
+                    continue
+
+                # لا تسمح باختصار بنفس اسم الأمر
+                if shortcut == original.name:
+                    continue
+
+                # لا تضيف إذا الاسم مستخدم مسبقًا
+                existing = self.bot.tree.get_command(
+                    shortcut,
+                    guild=guild
+                )
+
+                if existing:
+                    continue
+
+                try:
+                    command = self.create_shortcut(
+                        guild,
+                        original,
+                        shortcut
+                    )
+
+                    self.bot.tree.add_command(
+                        command,
+                        guild=guild,
+                        override=True
+                    )
+
+                    created.append(command)
+
+                    print(
+                        f"🔗 Shortcut loaded: "
+                        f"/{shortcut} -> /{original.name}"
+                    )
+
+                except Exception as e:
+                    print(
+                        f"❌ Failed shortcut "
+                        f"/{shortcut}: {e}"
+                    )
+
+            self.dynamic_commands[key] = created
+
+        try:
+            await self.bot.tree.sync(guild=guild)
+        except Exception as e:
+            print(
+                f"❌ Shortcut sync error "
+                f"{guild.name}: {e}"
+            )
+
+    # =====================================================
+    # SET COMMAND
+    # =====================================================
+
     @app_commands.command(
         name="حدد_امر",
-        description="تحديد اختصارات لأحد أوامر الإدارة"
+        description="تحديد اختصارات لأي أمر في البوت"
     )
     @app_commands.describe(
         command="الأمر الأساسي",
@@ -365,89 +279,85 @@ class Shortcuts(commands.Cog):
         shortcut2="الاختصار الثاني - اختياري",
         shortcut3="الاختصار الثالث - اختياري"
     )
-    @app_commands.choices(
-        command=[
-            app_commands.Choice(
-                name="Kick - طرد",
-                value="kick"
-            ),
-            app_commands.Choice(
-                name="Ban - حظر",
-                value="ban"
-            ),
-            app_commands.Choice(
-                name="Unban - فك حظر",
-                value="unban"
-            ),
-            app_commands.Choice(
-                name="Timeout - تايم",
-                value="timeout"
-            ),
-            app_commands.Choice(
-                name="Untimeout - فك تايم",
-                value="untimeout"
-            ),
-            app_commands.Choice(
-                name="Clear - مسح",
-                value="clear"
-            )
-        ]
-    )
     @app_commands.checks.has_permissions(
         manage_guild=True
     )
     async def set_shortcuts(
         self,
         interaction: discord.Interaction,
-        command: app_commands.Choice[str],
+        command: str,
         shortcut1: str,
         shortcut2: str = None,
         shortcut3: str = None
     ):
-        shortcut1 = shortcut1.strip().lower()
-        shortcut2 = (
-            shortcut2.strip().lower()
-            if shortcut2
-            else None
-        )
-        shortcut3 = (
-            shortcut3.strip().lower()
-            if shortcut3
-            else None
-        )
-        if not shortcut1:
+
+        original = self.find_command(command)
+
+        if not original:
             return await interaction.response.send_message(
-                "❌ الاختصار الأول إجباري.",
+                "❌ هذا الأمر غير موجود في البوت.",
                 ephemeral=True
             )
+
         shortcuts = [
             shortcut1,
             shortcut2,
             shortcut3
         ]
-        shortcuts = [
-            x for x in shortcuts
-            if x
-        ]
-        if len(set(shortcuts)) != len(shortcuts):
-            return await interaction.response.send_message(
-                "❌ لا يمكن تكرار نفس الاختصار.",
-                ephemeral=True
-            )
-        # منع استخدام اسم أمر موجود
+
+        cleaned = []
+
         for shortcut in shortcuts:
-            if self.bot.tree.get_command(
-                shortcut
-            ):
+
+            if not shortcut:
+                continue
+
+            shortcut = shortcut.strip()
+
+            if not self.valid_shortcut(shortcut):
                 return await interaction.response.send_message(
-                    f"❌ `{shortcut}` مستخدم مسبقًا كأمر.",
+                    f"❌ الاختصار `{shortcut}` غير صالح.",
                     ephemeral=True
                 )
-        # حذف الاختصارات القديمة لهذا السيرفر
-        await self.remove_guild_shortcuts(
-            interaction.guild
-        )
+
+            if shortcut == original.name:
+                return await interaction.response.send_message(
+                    "❌ لا يمكن أن يكون الاختصار نفس اسم الأمر.",
+                    ephemeral=True
+                )
+
+            if shortcut in cleaned:
+                return await interaction.response.send_message(
+                    f"❌ الاختصار `{shortcut}` مكرر.",
+                    ephemeral=True
+                )
+
+            cleaned.append(shortcut)
+
+        # التأكد أن الاختصارات غير مستخدمة
+        for shortcut in cleaned:
+
+            existing = self.bot.tree.get_command(
+                shortcut,
+                guild=interaction.guild
+            )
+
+            if existing and existing.name != shortcut:
+                return await interaction.response.send_message(
+                    f"❌ الاختصار `{shortcut}` مستخدم مسبقًا.",
+                    ephemeral=True
+                )
+
+            # حتى لو كان الأمر موجودًا بنفس الاسم
+            if existing:
+                return await interaction.response.send_message(
+                    f"❌ الأمر `/{shortcut}` موجود مسبقًا.",
+                    ephemeral=True
+                )
+
+        # حفظ قاعدة البيانات
         con = self.get_db()
+
         con.execute(
             """
             INSERT INTO command_shortcuts
@@ -459,6 +369,7 @@ class Shortcuts(commands.Cog):
                 shortcut3
             )
             VALUES (?, ?, ?, ?, ?)
+
             ON CONFLICT(guild_id, command_name)
             DO UPDATE SET
                 shortcut1 = excluded.shortcut1,
@@ -467,56 +378,76 @@ class Shortcuts(commands.Cog):
             """,
             (
                 interaction.guild.id,
-                command.value,
-                shortcut1,
-                shortcut2,
-                shortcut3
+                original.name,
+                cleaned[0],
+                cleaned[1] if len(cleaned) > 1 else None,
+                cleaned[2] if len(cleaned) > 2 else None
             )
         )
+
         con.commit()
         con.close()
-        # إنشاء الاختصارات الجديدة
-        for shortcut in shortcuts:
-            dynamic_command = self.build_command(
-                command.value,
-                shortcut
-            )
-            if dynamic_command:
+
+        # حذف اختصارات هذا الأمر فقط
+        self.remove_command_shortcuts(
+            interaction.guild,
+            original.name
+        )
+
+        created = []
+
+        for shortcut in cleaned:
+
+            try:
+                dynamic = self.create_shortcut(
+                    interaction.guild,
+                    original,
+                    shortcut
+                )
+
                 self.bot.tree.add_command(
-                    dynamic_command,
+                    dynamic,
                     guild=interaction.guild,
                     override=True
                 )
-                self.dynamic_commands[
-                    (
-                        interaction.guild.id,
-                        shortcut
-                    )
-                ] = dynamic_command
-        # مزامنة أوامر السيرفر
+
+                created.append(dynamic)
+
+            except Exception as e:
+                print(
+                    f"❌ Failed creating /{shortcut}: {e}"
+                )
+
+        self.dynamic_commands[
+            (interaction.guild.id, original.name)
+        ] = created
+
         try:
             await self.bot.tree.sync(
                 guild=interaction.guild
             )
         except Exception as e:
-            print(
-                f"❌ Shortcut Sync Error: {e}"
+            return await interaction.response.send_message(
+                f"⚠️ تم الحفظ لكن حدث خطأ أثناء المزامنة:\n`{e}`",
+                ephemeral=True
             )
-        result = (
-            f"**الأمر الأساسي:** `/{command.value}`\n\n"
-            f"**الاختصار الأول:** `/{shortcut1}`\n"
-            f"**الاختصار الثاني:** "
-            f"`/{shortcut2}`\n"
-            f"**الاختصار الثالث:** "
-            f"`/{shortcut3}`"
+
+        text = (
+            f"**الأمر الأساسي:** `/{original.name}`\n"
+            f"**الاختصارات:**\n"
         )
+
+        for shortcut in cleaned:
+            text += f"• `/{shortcut}`\n"
+
         await interaction.response.send_message(
-            "✅ تم إعداد اختصارات الأمر بنجاح.\n\n"
-            + result
+            "✅ تم تحديد الاختصارات بنجاح.\n\n" + text
         )
-    # =========================================================
-    # /اختصارات
-    # =========================================================
+
+    # =====================================================
+    # SHOW SHORTCUTS
+    # =====================================================
+
     @app_commands.command(
         name="اختصارات",
         description="عرض اختصارات الأوامر"
@@ -528,52 +459,77 @@ class Shortcuts(commands.Cog):
         self,
         interaction: discord.Interaction
     ):
+
         con = self.get_db()
+
         rows = con.execute(
             """
-            SELECT *
+            SELECT command_name, shortcut1, shortcut2, shortcut3
             FROM command_shortcuts
             WHERE guild_id = ?
             ORDER BY command_name
             """,
-            (
-                interaction.guild.id,
-            )
+            (interaction.guild.id,)
         ).fetchall()
+
         con.close()
+
         if not rows:
             return await interaction.response.send_message(
-                "📭 لا توجد اختصارات.",
+                "📭 لا توجد اختصارات محددة.",
                 ephemeral=True
             )
+
         embed = discord.Embed(
-            title="⚡ اختصارات الأوامر",
+            title="🔗 اختصارات الأوامر",
             color=discord.Color.blue()
         )
+
+        text = ""
+
         for row in rows:
-            shortcuts = [
-                f"`/{row['shortcut1']}`"
-            ]
-            if row["shortcut2"]:
-                shortcuts.append(
-                    f"`/{row['shortcut2']}`"
+
+            shortcuts = []
+
+            for value in (
+                row["shortcut1"],
+                row["shortcut2"],
+                row["shortcut3"]
+            ):
+                if value:
+                    shortcuts.append(f"`/{value}`")
+
+            line = (
+                f"**/{row['command_name']}**\n"
+                f"{' • '.join(shortcuts)}\n\n"
+            )
+
+            if len(text) + len(line) > 3900:
+                embed.add_field(
+                    name="الأوامر",
+                    value=text,
+                    inline=False
                 )
-            if row["shortcut3"]:
-                shortcuts.append(
-                    f"`/{row['shortcut3']}`"
-                )
+                text = ""
+
+            text += line
+
+        if text:
             embed.add_field(
-                name=f"/{row['command_name']}",
-                value=" • ".join(shortcuts),
+                name="الأوامر",
+                value=text,
                 inline=False
             )
+
         await interaction.response.send_message(
             embed=embed,
             ephemeral=True
         )
-    # =========================================================
-    # /حذف_اختصارات
-    # =========================================================
+
+    # =====================================================
+    # DELETE SHORTCUTS
+    # =====================================================
+
     @app_commands.command(
         name="حذف_اختصارات",
         description="حذف اختصارات أمر معين"
@@ -581,46 +537,25 @@ class Shortcuts(commands.Cog):
     @app_commands.describe(
         command="الأمر الذي تريد حذف اختصاراته"
     )
-    @app_commands.choices(
-        command=[
-            app_commands.Choice(
-                name="Kick - طرد",
-                value="kick"
-            ),
-            app_commands.Choice(
-                name="Ban - حظر",
-                value="ban"
-            ),
-            app_commands.Choice(
-                name="Unban - فك حظر",
-                value="unban"
-            ),
-            app_commands.Choice(
-                name="Timeout - تايم",
-                value="timeout"
-            ),
-            app_commands.Choice(
-                name="Untimeout - فك تايم",
-                value="untimeout"
-            ),
-            app_commands.Choice(
-                name="Clear - مسح",
-                value="clear"
-            )
-        ]
-    )
     @app_commands.checks.has_permissions(
         manage_guild=True
     )
     async def delete_shortcuts(
         self,
         interaction: discord.Interaction,
-        command: app_commands.Choice[str]
+        command: str
     ):
-        await self.remove_guild_shortcuts(
-            interaction.guild
-        )
+
+        original = self.find_command(command)
+
+        if not original:
+            return await interaction.response.send_message(
+                "❌ هذا الأمر غير موجود.",
+                ephemeral=True
+            )
+
         con = self.get_db()
+
         cursor = con.execute(
             """
             DELETE FROM command_shortcuts
@@ -629,44 +564,62 @@ class Shortcuts(commands.Cog):
             """,
             (
                 interaction.guild.id,
-                command.value
+                original.name
             )
         )
+
         con.commit()
         con.close()
+
+        if cursor.rowcount == 0:
+            return await interaction.response.send_message(
+                "❌ هذا الأمر ليس لديه اختصارات.",
+                ephemeral=True
+            )
+
+        self.remove_command_shortcuts(
+            interaction.guild,
+            original.name
+        )
+
         try:
             await self.bot.tree.sync(
                 guild=interaction.guild
             )
         except Exception:
             pass
-        if cursor.rowcount == 0:
-            return await interaction.response.send_message(
-                "❌ لا توجد اختصارات لهذا الأمر.",
-                ephemeral=True
-            )
+
         await interaction.response.send_message(
-            f"✅ تم حذف اختصارات `/{command.value}`."
+            f"✅ تم حذف اختصارات `/{original.name}`."
         )
-    # =========================================================
-    # عند تشغيل البوت
-    # =========================================================
+
+    # =====================================================
+    # READY
+    # =====================================================
+
     @commands.Cog.listener()
     async def on_ready(self):
+
+        if self.loaded:
+            return
+
+        self.loaded = True
+
         for guild in self.bot.guilds:
+
             try:
-                await self.load_shortcuts(
-                    guild
-                )
-                await self.bot.tree.sync(
-                    guild=guild
-                )
+                await self.load_guild_shortcuts(guild)
+
             except Exception as e:
                 print(
                     f"❌ Failed loading shortcuts "
                     f"for {guild.name}: {e}"
                 )
+
+
+# =========================================================
+# SETUP
+# =========================================================
+
 async def setup(bot):
-    await bot.add_cog(
-        Shortcuts(bot)
-    )
+    await bot.add_cog(Shortcuts(bot))
