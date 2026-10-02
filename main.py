@@ -98,7 +98,7 @@ bot = commands.Bot(
 
 
 # =========================================================
-# DATABASE SETTINGS
+# SETTINGS
 # =========================================================
 
 def ensure_guild_settings(guild_id: int):
@@ -117,6 +117,34 @@ def ensure_guild_settings(guild_id: int):
             auto_bot_role
         )
         VALUES (?, NULL, NULL, NULL, NULL, NULL)
+        """,
+        (guild_id,)
+    )
+
+    con.execute(
+        """
+        INSERT OR IGNORE INTO log_settings
+        (
+            guild_id,
+            member_log,
+            role_log,
+            message_log,
+            channel_log,
+            warning_log,
+            ticket_log,
+            application_log,
+            moderation_log,
+            suggestion_log,
+            notification_log,
+            voice_log,
+            level_log,
+            points_log
+        )
+        VALUES (
+            ?, NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL
+        )
         """,
         (guild_id,)
     )
@@ -180,14 +208,53 @@ def set_setting(
 
 
 # =========================================================
-# LOG SYSTEM
+# LOG SETTINGS
 # =========================================================
 
-async def get_log_channel(guild: discord.Guild):
+LOG_TYPES = {
+    "member": "لوق الأعضاء",
+    "role": "لوق الرتب",
+    "message": "لوق الرسائل",
+    "channel": "لوق القنوات",
+    "warning": "لوق التحذيرات",
+    "ticket": "لوق التذاكر",
+    "application": "لوق التقديمات",
+    "moderation": "لوق الإدارة",
+    "suggestion": "لوق الاقتراحات",
+    "notification": "لوق الإشعارات",
+    "voice": "لوق الفويس",
+    "level": "لوق اللفلات",
+    "points": "لوق النقاط"
+}
 
-    row = get_settings(guild.id)
 
-    channel_id = row["log_channel"]
+async def get_section_log_channel(
+    guild: discord.Guild,
+    log_type: str
+):
+
+    if log_type not in LOG_TYPES:
+        return None
+
+    ensure_guild_settings(guild.id)
+
+    con = db()
+
+    row = con.execute(
+        f"""
+        SELECT {log_type}_log
+        FROM log_settings
+        WHERE guild_id = ?
+        """,
+        (guild.id,)
+    ).fetchone()
+
+    con.close()
+
+    if not row:
+        return None
+
+    channel_id = row[f"{log_type}_log"]
 
     if not channel_id:
         return None
@@ -198,21 +265,24 @@ async def get_log_channel(guild: discord.Guild):
         return channel
 
     try:
-        channel = await bot.fetch_channel(channel_id)
-        return channel
+        return await bot.fetch_channel(channel_id)
     except Exception:
         return None
 
 
 async def send_log(
     guild: discord.Guild,
+    log_type: str,
     title: str,
     description: str,
     emoji: str = "📋",
     color: discord.Color = discord.Color.blurple()
 ):
 
-    channel = await get_log_channel(guild)
+    channel = await get_section_log_channel(
+        guild,
+        log_type
+    )
 
     if not channel:
         return
@@ -230,14 +300,16 @@ async def send_log(
 
     try:
         await channel.send(embed=embed)
+
     except Exception as e:
+
         print(
-            f"❌ Log Send Error [{guild.name}]: {e}"
+            f"❌ Log Error [{log_type}] [{guild.name}]: {e}"
         )
 
 
 # =========================================================
-# AUDIT LOG HELPER
+# AUDIT LOG
 # =========================================================
 
 async def get_recent_audit_entry(
@@ -290,15 +362,9 @@ async def give_auto_role(
         return
 
     if not me.guild_permissions.manage_roles:
-        print(
-            f"⚠️ البوت لا يملك Manage Roles في {member.guild.name}"
-        )
         return
 
     if role >= me.top_role:
-        print(
-            f"⚠️ الرتبة {role.name} أعلى من رتبة البوت"
-        )
         return
 
     try:
@@ -308,15 +374,9 @@ async def give_auto_role(
             reason=f"CTRP Auto Role - {role_type}"
         )
 
-        print(
-            f"✅ Auto Role: {member} -> {role.name}"
-        )
-
     except Exception as e:
 
-        print(
-            f"❌ Auto Role Error: {e}"
-        )
+        print(f"❌ Auto Role Error: {e}")
 
 
 # =========================================================
@@ -324,34 +384,29 @@ async def give_auto_role(
 # =========================================================
 
 @bot.event
-async def on_member_join(member: discord.Member):
+async def on_member_join(member):
 
     row = get_settings(member.guild.id)
 
     if member.bot:
 
-        role_id = row["auto_bot_role"]
-
-        if role_id:
-            await give_auto_role(
-                member,
-                role_id,
-                "Bot"
-            )
+        await give_auto_role(
+            member,
+            row["auto_bot_role"],
+            "Bot"
+        )
 
     else:
 
-        role_id = row["auto_member_role"]
-
-        if role_id:
-            await give_auto_role(
-                member,
-                role_id,
-                "Member"
-            )
+        await give_auto_role(
+            member,
+            row["auto_member_role"],
+            "Member"
+        )
 
     await send_log(
         member.guild,
+        "member",
         "دخول عضو",
         (
             f"**العضو:** {member.mention}\n"
@@ -368,22 +423,23 @@ async def on_member_join(member: discord.Member):
 # =========================================================
 
 @bot.event
-async def on_member_remove(member: discord.Member):
+async def on_member_remove(member):
 
     await asyncio.sleep(1)
 
-    kick_entry = await get_recent_audit_entry(
+    entry = await get_recent_audit_entry(
         member.guild,
         discord.AuditLogAction.kick,
         member.id
     )
 
-    if kick_entry:
+    if entry:
 
-        executor = kick_entry.user
+        executor = entry.user
 
         await send_log(
             member.guild,
+            "member",
             "طرد عضو",
             (
                 f"**العضو:** `{member}`\n"
@@ -399,6 +455,7 @@ async def on_member_remove(member: discord.Member):
 
     await send_log(
         member.guild,
+        "member",
         "خروج عضو",
         (
             f"**العضو:** `{member}`\n"
@@ -414,10 +471,7 @@ async def on_member_remove(member: discord.Member):
 # =========================================================
 
 @bot.event
-async def on_member_ban(
-    guild: discord.Guild,
-    user: discord.User
-):
+async def on_member_ban(guild, user):
 
     await asyncio.sleep(1)
 
@@ -427,11 +481,7 @@ async def on_member_ban(
         user.id
     )
 
-    executor = (
-        entry.user
-        if entry
-        else None
-    )
+    executor = entry.user if entry else None
 
     reason = (
         entry.reason
@@ -441,6 +491,7 @@ async def on_member_ban(
 
     await send_log(
         guild,
+        "member",
         "حظر عضو",
         (
             f"**العضو:** {user.mention}\n"
@@ -459,9 +510,7 @@ async def on_member_ban(
 # =========================================================
 
 @bot.event
-async def on_message_delete(
-    message: discord.Message
-):
+async def on_message_delete(message):
 
     if not message.guild:
         return
@@ -476,6 +525,7 @@ async def on_message_delete(
 
     await send_log(
         message.guild,
+        "message",
         "حذف رسالة",
         (
             f"**العضو:** {message.author.mention}\n"
@@ -493,10 +543,7 @@ async def on_message_delete(
 # =========================================================
 
 @bot.event
-async def on_message_edit(
-    before: discord.Message,
-    after: discord.Message
-):
+async def on_message_edit(before, after):
 
     if not before.guild:
         return
@@ -518,6 +565,7 @@ async def on_message_edit(
 
     await send_log(
         before.guild,
+        "message",
         "تعديل رسالة",
         (
             f"**العضو:** {before.author.mention}\n"
@@ -537,9 +585,7 @@ async def on_message_edit(
 # =========================================================
 
 @bot.event
-async def on_guild_channel_create(
-    channel: discord.abc.GuildChannel
-):
+async def on_guild_channel_create(channel):
 
     await asyncio.sleep(1)
 
@@ -553,6 +599,7 @@ async def on_guild_channel_create(
 
     await send_log(
         channel.guild,
+        "channel",
         "إنشاء روم",
         (
             f"**الروم:** {channel.mention}\n"
@@ -570,9 +617,7 @@ async def on_guild_channel_create(
 # =========================================================
 
 @bot.event
-async def on_guild_channel_delete(
-    channel: discord.abc.GuildChannel
-):
+async def on_guild_channel_delete(channel):
 
     await asyncio.sleep(1)
 
@@ -586,6 +631,7 @@ async def on_guild_channel_delete(
 
     await send_log(
         channel.guild,
+        "channel",
         "حذف روم",
         (
             f"**الروم:** `#{channel.name}`\n"
@@ -603,9 +649,7 @@ async def on_guild_channel_delete(
 # =========================================================
 
 @bot.event
-async def on_guild_role_create(
-    role: discord.Role
-):
+async def on_guild_role_create(role):
 
     await asyncio.sleep(1)
 
@@ -619,6 +663,7 @@ async def on_guild_role_create(
 
     await send_log(
         role.guild,
+        "role",
         "إنشاء رتبة",
         (
             f"**الرتبة:** {role.mention}\n"
@@ -636,9 +681,7 @@ async def on_guild_role_create(
 # =========================================================
 
 @bot.event
-async def on_guild_role_delete(
-    role: discord.Role
-):
+async def on_guild_role_delete(role):
 
     await asyncio.sleep(1)
 
@@ -652,6 +695,7 @@ async def on_guild_role_delete(
 
     await send_log(
         role.guild,
+        "role",
         "حذف رتبة",
         (
             f"**الرتبة:** `{role.name}`\n"
@@ -669,10 +713,7 @@ async def on_guild_role_delete(
 # =========================================================
 
 @bot.event
-async def on_guild_role_update(
-    before: discord.Role,
-    after: discord.Role
-):
+async def on_guild_role_update(before, after):
 
     if before.name == after.name:
         return
@@ -689,6 +730,7 @@ async def on_guild_role_update(
 
     await send_log(
         after.guild,
+        "role",
         "تعديل رتبة",
         (
             f"**قبل:** `{before.name}`\n"
@@ -706,10 +748,7 @@ async def on_guild_role_update(
 # =========================================================
 
 @bot.event
-async def on_member_update(
-    before: discord.Member,
-    after: discord.Member
-):
+async def on_member_update(before, after):
 
     before_roles = set(before.roles)
     after_roles = set(after.roles)
@@ -743,10 +782,10 @@ async def on_member_update(
 
         await send_log(
             after.guild,
+            "role",
             "إعطاء رتبة",
             (
-                f"**العضو الذي أخذ الرتبة:** "
-                f"{after.mention}\n"
+                f"**العضو:** {after.mention}\n"
                 f"**الرتبة:** {role.mention}\n"
                 f"**بواسطة:** {executor_text}"
             ),
@@ -761,10 +800,10 @@ async def on_member_update(
 
         await send_log(
             after.guild,
+            "role",
             "سحب رتبة",
             (
-                f"**العضو الذي سُحبت منه الرتبة:** "
-                f"{after.mention}\n"
+                f"**العضو:** {after.mention}\n"
                 f"**الرتبة:** {role.mention}\n"
                 f"**بواسطة:** {executor_text}"
             ),
@@ -774,12 +813,121 @@ async def on_member_update(
 
 
 # =========================================================
+# LOG CHANNEL SELECT
+# =========================================================
+
+class LogChannelSelect(discord.ui.ChannelSelect):
+
+    def __init__(self, log_type):
+
+        self.log_type = log_type
+
+        super().__init__(
+            placeholder="اختر روم اللوق",
+            channel_types=[
+                discord.ChannelType.text
+            ],
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction):
+
+        ensure_guild_settings(
+            interaction.guild.id
+        )
+
+        con = db()
+
+        con.execute(
+            f"""
+            UPDATE log_settings
+            SET {self.log_type}_log = ?
+            WHERE guild_id = ?
+            """,
+            (
+                self.values[0].id,
+                interaction.guild.id
+            )
+        )
+
+        con.commit()
+        con.close()
+
+        await interaction.response.send_message(
+            f"✅ تم تحديد {LOG_TYPES[self.log_type]}: "
+            f"{self.values[0].mention}",
+            ephemeral=True
+        )
+
+
+class LogChannelView(discord.ui.View):
+
+    def __init__(self, log_type):
+
+        super().__init__(timeout=60)
+
+        self.add_item(
+            LogChannelSelect(log_type)
+        )
+
+
+# =========================================================
+# LOG TYPE SELECT
+# =========================================================
+
+class LogTypeSelect(discord.ui.Select):
+
+    def __init__(self):
+
+        options = []
+
+        for key, name in LOG_TYPES.items():
+
+            options.append(
+                discord.SelectOption(
+                    label=name,
+                    value=key,
+                    emoji="📋"
+                )
+            )
+
+        super().__init__(
+            placeholder="اختر نوع اللوق",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction):
+
+        log_type = self.values[0]
+
+        await interaction.response.send_message(
+            f"اختر روم {LOG_TYPES[log_type]}:",
+            view=LogChannelView(log_type),
+            ephemeral=True
+        )
+
+
+class LogTypeView(discord.ui.View):
+
+    def __init__(self):
+
+        super().__init__(timeout=60)
+
+        self.add_item(
+            LogTypeSelect()
+        )
+
+
+# =========================================================
 # AUTO ROLE SELECT
 # =========================================================
 
 class AutoRoleSelect(discord.ui.RoleSelect):
 
-    def __init__(self, role_type: str):
+    def __init__(self, role_type):
 
         self.role_type = role_type
 
@@ -789,31 +937,24 @@ class AutoRoleSelect(discord.ui.RoleSelect):
             max_values=1
         )
 
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
+    async def callback(self, interaction):
 
         role = self.values[0]
         me = interaction.guild.me
 
         if not me.guild_permissions.manage_roles:
 
-            await interaction.response.send_message(
+            return await interaction.response.send_message(
                 "❌ البوت لا يملك صلاحية إدارة الرتب.",
                 ephemeral=True
             )
 
-            return
-
         if role >= me.top_role:
 
-            await interaction.response.send_message(
+            return await interaction.response.send_message(
                 "❌ هذه الرتبة أعلى من رتبة البوت أو مساوية لها.",
                 ephemeral=True
             )
-
-            return
 
         if self.role_type == "member":
 
@@ -849,7 +990,7 @@ class AutoRoleSelect(discord.ui.RoleSelect):
 
 class AutoRoleView(discord.ui.View):
 
-    def __init__(self, role_type: str):
+    def __init__(self, role_type):
 
         super().__init__(timeout=60)
 
@@ -859,70 +1000,19 @@ class AutoRoleView(discord.ui.View):
 
 
 # =========================================================
-# LOG CHANNEL SELECT
-# =========================================================
-
-class LogChannelSelect(discord.ui.ChannelSelect):
-
-    def __init__(self):
-
-        super().__init__(
-            placeholder="اختر روم اللوق",
-            channel_types=[
-                discord.ChannelType.text
-            ],
-            min_values=1,
-            max_values=1
-        )
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        channel = self.values[0]
-
-        set_setting(
-            interaction.guild.id,
-            "log_channel",
-            channel.id
-        )
-
-        await interaction.response.send_message(
-            f"✅ تم تحديد روم اللوق: {channel.mention}",
-            ephemeral=True
-        )
-
-
-class LogChannelView(discord.ui.View):
-
-    def __init__(self):
-
-        super().__init__(timeout=60)
-
-        self.add_item(
-            LogChannelSelect()
-        )
-
-
-# =========================================================
-# SLASH COMMANDS
+# COMMANDS
 # =========================================================
 
 @bot.tree.command(
     name="تحديد_اللوق",
-    description="تحديد روم سجلات السيرفر"
+    description="تحديد روم لقسم من أقسام اللوق"
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def set_log(
-    interaction: discord.Interaction
-):
+@app_commands.checks.has_permissions(administrator=True)
+async def set_log(interaction):
 
     await interaction.response.send_message(
-        "اختر روم اللوق من القائمة:",
-        view=LogChannelView(),
+        "اختر قسم اللوق الذي تريد تحديده:",
+        view=LogTypeView(),
         ephemeral=True
     )
 
@@ -931,12 +1021,8 @@ async def set_log(
     name="رتبة_تلقائية_عضو",
     description="تحديد الرتبة التلقائية للأعضاء"
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def auto_member_role(
-    interaction: discord.Interaction
-):
+@app_commands.checks.has_permissions(administrator=True)
+async def auto_member_role(interaction):
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها العضو تلقائيًا:",
@@ -949,12 +1035,8 @@ async def auto_member_role(
     name="رتبة_تلقائية_بوت",
     description="تحديد الرتبة التلقائية للبوتات"
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def auto_bot_role(
-    interaction: discord.Interaction
-):
+@app_commands.checks.has_permissions(administrator=True)
+async def auto_bot_role(interaction):
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها البوت تلقائيًا:",
@@ -965,77 +1047,52 @@ async def auto_bot_role(
 
 @bot.tree.command(
     name="اعدادات_اللوق",
-    description="عرض إعدادات اللوق والرتب التلقائية"
+    description="عرض إعدادات اللوقات"
 )
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def log_settings(
-    interaction: discord.Interaction
-):
+@app_commands.checks.has_permissions(administrator=True)
+async def log_settings(interaction):
 
-    row = get_settings(
+    ensure_guild_settings(
         interaction.guild.id
     )
 
-    log_channel = (
-        interaction.guild.get_channel(
-            row["log_channel"]
-        )
-        if row["log_channel"]
-        else None
-    )
+    con = db()
 
-    member_role = (
-        interaction.guild.get_role(
-            row["auto_member_role"]
-        )
-        if row["auto_member_role"]
-        else None
-    )
+    row = con.execute(
+        """
+        SELECT *
+        FROM log_settings
+        WHERE guild_id = ?
+        """,
+        (interaction.guild.id,)
+    ).fetchone()
 
-    bot_role = (
-        interaction.guild.get_role(
-            row["auto_bot_role"]
-        )
-        if row["auto_bot_role"]
-        else None
-    )
+    con.close()
 
     embed = discord.Embed(
-        title="⚙️ إعدادات CTRP",
+        title="⚙️ إعدادات اللوقات",
         color=discord.Color.blurple()
     )
 
-    embed.add_field(
-        name="📋 روم اللوق",
-        value=(
-            log_channel.mention
-            if log_channel
-            else "غير محدد"
-        ),
-        inline=False
-    )
+    for key, name in LOG_TYPES.items():
 
-    embed.add_field(
-        name="👤 رتبة الأعضاء",
-        value=(
-            member_role.mention
-            if member_role
-            else "غير محددة"
-        ),
-        inline=False
-    )
+        channel_id = row[f"{key}_log"]
 
-    embed.add_field(
-        name="🤖 رتبة البوتات",
-        value=(
-            bot_role.mention
-            if bot_role
-            else "غير محددة"
-        ),
-        inline=False
-    )
+        channel = (
+            interaction.guild.get_channel(channel_id)
+            if channel_id
+            else None
+        )
+
+        embed.add_field(
+            name=name,
+            value=(
+                channel.mention
+                if channel
+                else "غير محدد"
+            ),
+            inline=False
+        )
 
     await interaction.response.send_message(
         embed=embed,
@@ -1044,7 +1101,7 @@ async def log_settings(
 
 
 # =========================================================
-# WARNING LOG SYSTEM
+# WARNING WATCHER
 # =========================================================
 
 last_warning_id = {}
@@ -1088,7 +1145,7 @@ async def warning_watcher_task():
             (
                 min(last_warning_id.values())
                 if last_warning_id
-                else 0,
+                else 0
             )
         ).fetchall()
 
@@ -1111,20 +1168,13 @@ async def warning_watcher_task():
                 guild_id
             ] = warning_id
 
-            guild = bot.get_guild(
-                guild_id
-            )
+            guild = bot.get_guild(guild_id)
 
             if not guild:
                 continue
 
-            user = guild.get_member(
-                row["user_id"]
-            )
-
-            moderator = guild.get_member(
-                row["moderator_id"]
-            )
+            user = guild.get_member(row["user_id"])
+            moderator = guild.get_member(row["moderator_id"])
 
             user_text = (
                 user.mention
@@ -1140,6 +1190,7 @@ async def warning_watcher_task():
 
             await send_log(
                 guild,
+                "warning",
                 "تحذير عضو",
                 (
                     f"**العضو:** {user_text}\n"
@@ -1172,17 +1223,10 @@ async def load_systems():
 
     systems_folder = "systems"
 
-    if not os.path.exists(
-        systems_folder
-    ):
+    if not os.path.exists(systems_folder):
+        os.makedirs(systems_folder)
 
-        os.makedirs(
-            systems_folder
-        )
-
-    for filename in os.listdir(
-        systems_folder
-    ):
+    for filename in os.listdir(systems_folder):
 
         if not filename.endswith(".py"):
             continue
@@ -1191,16 +1235,11 @@ async def load_systems():
             continue
 
         module_name = filename[:-3]
-
-        extension = (
-            f"{systems_folder}.{module_name}"
-        )
+        extension = f"{systems_folder}.{module_name}"
 
         try:
 
-            await bot.load_extension(
-                extension
-            )
+            await bot.load_extension(extension)
 
             print(
                 f"✅ Loaded: {extension}"
@@ -1218,7 +1257,7 @@ async def load_systems():
 
 
 # =========================================================
-# BOT READY
+# READY
 # =========================================================
 
 @bot.event
@@ -1257,7 +1296,6 @@ async def main():
     await load_systems()
 
     if not warning_watcher_task.is_running():
-
         warning_watcher_task.start()
 
     await bot.start(TOKEN)
