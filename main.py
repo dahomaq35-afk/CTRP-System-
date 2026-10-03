@@ -1,9 +1,13 @@
 import os
+import io
 import asyncio
 import threading
 import sqlite3
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 import discord
 from discord import app_commands
@@ -49,11 +53,14 @@ PORT = int(os.getenv("PORT", "10000"))
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
+
         self.send_header(
             "Content-Type",
             "text/plain; charset=utf-8"
         )
+
         self.end_headers()
 
         self.wfile.write(
@@ -208,6 +215,586 @@ def set_setting(
 
 
 # =========================================================
+# WELCOME DATABASE
+# =========================================================
+
+def init_welcome_db():
+
+    con = db()
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS welcome_settings
+        (
+            guild_id INTEGER PRIMARY KEY,
+
+            enabled INTEGER DEFAULT 0,
+
+            channel_id INTEGER,
+
+            background_url TEXT,
+
+            show_avatar INTEGER DEFAULT 1,
+
+            avatar_x REAL DEFAULT 50,
+            avatar_y REAL DEFAULT 50,
+            avatar_size REAL DEFAULT 180,
+
+            avatar_shape TEXT DEFAULT 'circle',
+
+            show_username INTEGER DEFAULT 1,
+
+            username_x REAL DEFAULT 50,
+            username_y REAL DEFAULT 78,
+
+            username_size REAL DEFAULT 48,
+
+            username_color TEXT DEFAULT '#FFFFFF',
+
+            message TEXT DEFAULT
+                'مرحباً {mention} في {server}',
+
+            image_width INTEGER DEFAULT 1024,
+            image_height INTEGER DEFAULT 400
+        )
+        """
+    )
+
+    con.commit()
+    con.close()
+
+
+init_welcome_db()
+
+
+def ensure_welcome_settings(guild_id: int):
+
+    con = db()
+
+    con.execute(
+        """
+        INSERT OR IGNORE INTO welcome_settings
+        (
+            guild_id,
+            enabled,
+            channel_id,
+            background_url,
+            show_avatar,
+            avatar_x,
+            avatar_y,
+            avatar_size,
+            avatar_shape,
+            show_username,
+            username_x,
+            username_y,
+            username_size,
+            username_color,
+            message,
+            image_width,
+            image_height
+        )
+        VALUES
+        (
+            ?,
+            0,
+            NULL,
+            NULL,
+            1,
+            50,
+            50,
+            180,
+            'circle',
+            1,
+            50,
+            78,
+            48,
+            '#FFFFFF',
+            'مرحباً {mention} في {server}',
+            1024,
+            400
+        )
+        """,
+        (guild_id,)
+    )
+
+    con.commit()
+    con.close()
+
+
+def get_welcome_settings(guild_id: int):
+
+    ensure_welcome_settings(guild_id)
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT *
+        FROM welcome_settings
+        WHERE guild_id = ?
+        """,
+        (guild_id,)
+    ).fetchone()
+
+    con.close()
+
+    return row
+
+
+# =========================================================
+# WELCOME IMAGE HELPERS
+# =========================================================
+
+def download_image(url: str):
+
+    try:
+
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent": "CTRP-Bot/1.0"
+            }
+        )
+
+        response.raise_for_status()
+
+        image = Image.open(
+            io.BytesIO(response.content)
+        )
+
+        return image.convert("RGBA")
+
+    except Exception as e:
+
+        print(
+            f"❌ Welcome Image Error: {e}"
+        )
+
+        return None
+
+
+def get_font(size: int, bold: bool = False):
+
+    fonts = []
+
+    if bold:
+
+        fonts.extend(
+            [
+                "DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            ]
+        )
+
+    else:
+
+        fonts.extend(
+            [
+                "DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            ]
+        )
+
+    for font_path in fonts:
+
+        try:
+
+            return ImageFont.truetype(
+                font_path,
+                size
+            )
+
+        except Exception:
+            continue
+
+    return ImageFont.load_default()
+
+
+def create_circle_avatar(
+    image: Image.Image,
+    size: int
+):
+
+    image = ImageOps.fit(
+        image.convert("RGBA"),
+        (size, size),
+        method=Image.Resampling.LANCZOS
+    )
+
+    mask = Image.new(
+        "L",
+        (size, size),
+        0
+    )
+
+    mask_draw = ImageDraw.Draw(mask)
+
+    mask_draw.ellipse(
+        (0, 0, size - 1, size - 1),
+        fill=255
+    )
+
+    image.putalpha(mask)
+
+    return image
+
+
+def create_rounded_avatar(
+    image: Image.Image,
+    size: int
+):
+
+    image = ImageOps.fit(
+        image.convert("RGBA"),
+        (size, size),
+        method=Image.Resampling.LANCZOS
+    )
+
+    mask = Image.new(
+        "L",
+        (size, size),
+        0
+    )
+
+    mask_draw = ImageDraw.Draw(mask)
+
+    radius = max(
+        10,
+        int(size * 0.18)
+    )
+
+    mask_draw.rounded_rectangle(
+        (0, 0, size - 1, size - 1),
+        radius=radius,
+        fill=255
+    )
+
+    image.putalpha(mask)
+
+    return image
+
+
+def safe_color(value, fallback="#FFFFFF"):
+
+    if not value:
+        return fallback
+
+    try:
+
+        value = str(value).strip()
+
+        if not value.startswith("#"):
+            value = "#" + value
+
+        if len(value) != 7:
+            return fallback
+
+        int(value[1:], 16)
+
+        return value
+
+    except Exception:
+
+        return fallback
+
+
+# =========================================================
+# CREATE WELCOME IMAGE
+# =========================================================
+
+def make_welcome_image(
+    member: discord.Member,
+    settings
+):
+
+    width = int(
+        settings["image_width"] or 1024
+    )
+
+    height = int(
+        settings["image_height"] or 400
+    )
+
+    width = max(
+        400,
+        min(width, 3000)
+    )
+
+    height = max(
+        200,
+        min(height, 2000)
+    )
+
+    # -----------------------------------------------------
+    # BACKGROUND
+    # -----------------------------------------------------
+
+    background = None
+
+    background_url = settings["background_url"]
+
+    if background_url:
+
+        background = download_image(
+            background_url
+        )
+
+    if background:
+
+        background = ImageOps.fit(
+            background,
+            (width, height),
+            method=Image.Resampling.LANCZOS
+        )
+
+    else:
+
+        background = Image.new(
+            "RGBA",
+            (width, height),
+            (12, 12, 12, 255)
+        )
+
+    canvas = background.convert("RGBA")
+
+    draw = ImageDraw.Draw(canvas)
+
+    # -----------------------------------------------------
+    # AVATAR
+    # -----------------------------------------------------
+
+    if settings["show_avatar"]:
+
+        try:
+
+            avatar_url = str(
+                member.display_avatar.replace(
+                    size=512
+                ).url
+            )
+
+            avatar = download_image(
+                avatar_url
+            )
+
+            if avatar:
+
+                avatar_size = int(
+                    settings["avatar_size"] or 180
+                )
+
+                avatar_size = max(
+                    40,
+                    min(avatar_size, 1000)
+                )
+
+                shape = (
+                    settings["avatar_shape"]
+                    or "circle"
+                )
+
+                if shape == "rounded":
+
+                    avatar = create_rounded_avatar(
+                        avatar,
+                        avatar_size
+                    )
+
+                elif shape == "square":
+
+                    avatar = ImageOps.fit(
+                        avatar,
+                        (
+                            avatar_size,
+                            avatar_size
+                        ),
+                        method=Image.Resampling.LANCZOS
+                    )
+
+                else:
+
+                    avatar = create_circle_avatar(
+                        avatar,
+                        avatar_size
+                    )
+
+                avatar_x = float(
+                    settings["avatar_x"]
+                    if settings["avatar_x"] is not None
+                    else 50
+                )
+
+                avatar_y = float(
+                    settings["avatar_y"]
+                    if settings["avatar_y"] is not None
+                    else 50
+                )
+
+                x = int(
+                    width *
+                    (avatar_x / 100)
+                    -
+                    avatar_size / 2
+                )
+
+                y = int(
+                    height *
+                    (avatar_y / 100)
+                    -
+                    avatar_size / 2
+                )
+
+                canvas.alpha_composite(
+                    avatar,
+                    (x, y)
+                )
+
+        except Exception as e:
+
+            print(
+                f"❌ Avatar Render Error: {e}"
+            )
+
+    # -----------------------------------------------------
+    # USERNAME
+    # -----------------------------------------------------
+
+    if settings["show_username"]:
+
+        username = member.display_name
+
+        username_size = int(
+            settings["username_size"] or 48
+        )
+
+        username_size = max(
+            12,
+            min(username_size, 300)
+        )
+
+        font = get_font(
+            username_size,
+            bold=True
+        )
+
+        username_color = safe_color(
+            settings["username_color"],
+            "#FFFFFF"
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            username,
+            font=font
+        )
+
+        text_width = (
+            bbox[2] - bbox[0]
+        )
+
+        text_height = (
+            bbox[3] - bbox[1]
+        )
+
+        username_x = float(
+            settings["username_x"]
+            if settings["username_x"] is not None
+            else 50
+        )
+
+        username_y = float(
+            settings["username_y"]
+            if settings["username_y"] is not None
+            else 78
+        )
+
+        x = int(
+            width *
+            (username_x / 100)
+            -
+            text_width / 2
+        )
+
+        y = int(
+            height *
+            (username_y / 100)
+            -
+            text_height / 2
+        )
+
+        # Shadow
+        draw.text(
+            (
+                x + 3,
+                y + 3
+            ),
+            username,
+            font=font,
+            fill="#000000",
+            stroke_width=2,
+            stroke_fill="#000000"
+        )
+
+        draw.text(
+            (x, y),
+            username,
+            font=font,
+            fill=username_color
+        )
+
+    # -----------------------------------------------------
+    # MESSAGE
+    # -----------------------------------------------------
+
+    message = (
+        settings["message"]
+        or "مرحباً {mention} في {server}"
+    )
+
+    message = message.replace(
+        "{user}",
+        member.display_name
+    )
+
+    message = message.replace(
+        "{username}",
+        member.display_name
+    )
+
+    message = message.replace(
+        "{mention}",
+        member.mention
+    )
+
+    message = message.replace(
+        "{server}",
+        member.guild.name
+    )
+
+    message = message.replace(
+        "{count}",
+        str(member.guild.member_count)
+    )
+
+    # -----------------------------------------------------
+    # EXPORT
+    # -----------------------------------------------------
+
+    buffer = io.BytesIO()
+
+    canvas.save(
+        buffer,
+        format="PNG",
+        optimize=True
+    )
+
+    buffer.seek(0)
+
+    return buffer, message
+
+
+# =========================================================
 # LOG SETTINGS
 # =========================================================
 
@@ -236,7 +823,9 @@ async def get_section_log_channel(
     if log_type not in LOG_TYPES:
         return None
 
-    ensure_guild_settings(guild.id)
+    ensure_guild_settings(
+        guild.id
+    )
 
     con = db()
 
@@ -254,19 +843,28 @@ async def get_section_log_channel(
     if not row:
         return None
 
-    channel_id = row[f"{log_type}_log"]
+    channel_id = row[
+        f"{log_type}_log"
+    ]
 
     if not channel_id:
         return None
 
-    channel = guild.get_channel(channel_id)
+    channel = guild.get_channel(
+        int(channel_id)
+    )
 
     if channel:
         return channel
 
     try:
-        return await bot.fetch_channel(channel_id)
+
+        return await bot.fetch_channel(
+            int(channel_id)
+        )
+
     except Exception:
+
         return None
 
 
@@ -291,7 +889,9 @@ async def send_log(
         title=f"{emoji} {title}",
         description=description,
         color=color,
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(
+            timezone.utc
+        )
     )
 
     embed.set_footer(
@@ -299,12 +899,17 @@ async def send_log(
     )
 
     try:
-        await channel.send(embed=embed)
+
+        await channel.send(
+            embed=embed
+        )
 
     except Exception as e:
 
         print(
-            f"❌ Log Error [{log_type}] [{guild.name}]: {e}"
+            f"❌ Log Error "
+            f"[{log_type}] "
+            f"[{guild.name}]: {e}"
         )
 
 
@@ -326,10 +931,15 @@ async def get_recent_audit_entry(
             action=action
         ):
 
-            if entry.target and entry.target.id == target_id:
+            if (
+                entry.target
+                and entry.target.id == target_id
+            ):
+
                 return entry
 
     except Exception:
+
         return None
 
     return None
@@ -348,7 +958,9 @@ async def give_auto_role(
     if not role_id:
         return
 
-    role = member.guild.get_role(role_id)
+    role = member.guild.get_role(
+        int(role_id)
+    )
 
     if not role:
         return
@@ -376,7 +988,9 @@ async def give_auto_role(
 
     except Exception as e:
 
-        print(f"❌ Auto Role Error: {e}")
+        print(
+            f"❌ Auto Role Error: {e}"
+        )
 
 
 # =========================================================
@@ -386,7 +1000,13 @@ async def give_auto_role(
 @bot.event
 async def on_member_join(member):
 
-    row = get_settings(member.guild.id)
+    # -----------------------------------------------------
+    # AUTO ROLE
+    # -----------------------------------------------------
+
+    row = get_settings(
+        member.guild.id
+    )
 
     if member.bot:
 
@@ -404,6 +1024,10 @@ async def on_member_join(member):
             "Member"
         )
 
+    # -----------------------------------------------------
+    # MEMBER LOG
+    # -----------------------------------------------------
+
     await send_log(
         member.guild,
         "member",
@@ -416,6 +1040,74 @@ async def on_member_join(member):
         "📥",
         discord.Color.green()
     )
+
+    # -----------------------------------------------------
+    # WELCOME
+    # -----------------------------------------------------
+
+    try:
+
+        welcome = get_welcome_settings(
+            member.guild.id
+        )
+
+        if not welcome:
+            return
+
+        if not welcome["enabled"]:
+            return
+
+        channel_id = welcome["channel_id"]
+
+        if not channel_id:
+            return
+
+        channel = member.guild.get_channel(
+            int(channel_id)
+        )
+
+        if not channel:
+
+            try:
+
+                channel = await bot.fetch_channel(
+                    int(channel_id)
+                )
+
+            except Exception:
+
+                return
+
+        image_buffer, message = (
+            await asyncio.to_thread(
+                make_welcome_image,
+                member,
+                welcome
+            )
+        )
+
+        file = discord.File(
+            image_buffer,
+            filename="welcome.png"
+        )
+
+        await channel.send(
+            content=message,
+            file=file
+        )
+
+        print(
+            f"👋 Welcome sent: "
+            f"{member} -> "
+            f"{member.guild.name}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Welcome Error "
+            f"[{member.guild.name}]: {e}"
+        )
 
 
 # =========================================================
@@ -481,7 +1173,11 @@ async def on_member_ban(guild, user):
         user.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     reason = (
         entry.reason
@@ -518,10 +1214,17 @@ async def on_message_delete(message):
     if message.author.bot:
         return
 
-    content = message.content or "لا يوجد محتوى نصي"
+    content = (
+        message.content
+        or "لا يوجد محتوى نصي"
+    )
 
     if len(content) > 1000:
-        content = content[:1000] + "..."
+
+        content = (
+            content[:1000]
+            + "..."
+        )
 
     await send_log(
         message.guild,
@@ -543,7 +1246,10 @@ async def on_message_delete(message):
 # =========================================================
 
 @bot.event
-async def on_message_edit(before, after):
+async def on_message_edit(
+    before,
+    after
+):
 
     if not before.guild:
         return
@@ -554,14 +1260,29 @@ async def on_message_edit(before, after):
     if before.content == after.content:
         return
 
-    old_content = before.content or "فارغ"
-    new_content = after.content or "فارغ"
+    old_content = (
+        before.content
+        or "فارغ"
+    )
+
+    new_content = (
+        after.content
+        or "فارغ"
+    )
 
     if len(old_content) > 700:
-        old_content = old_content[:700] + "..."
+
+        old_content = (
+            old_content[:700]
+            + "..."
+        )
 
     if len(new_content) > 700:
-        new_content = new_content[:700] + "..."
+
+        new_content = (
+            new_content[:700]
+            + "..."
+        )
 
     await send_log(
         before.guild,
@@ -595,7 +1316,11 @@ async def on_guild_channel_create(channel):
         channel.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     await send_log(
         channel.guild,
@@ -627,7 +1352,11 @@ async def on_guild_channel_delete(channel):
         channel.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     await send_log(
         channel.guild,
@@ -659,7 +1388,11 @@ async def on_guild_role_create(role):
         role.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     await send_log(
         role.guild,
@@ -691,7 +1424,11 @@ async def on_guild_role_delete(role):
         role.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     await send_log(
         role.guild,
@@ -713,7 +1450,10 @@ async def on_guild_role_delete(role):
 # =========================================================
 
 @bot.event
-async def on_guild_role_update(before, after):
+async def on_guild_role_update(
+    before,
+    after
+):
 
     if before.name == after.name:
         return
@@ -726,7 +1466,11 @@ async def on_guild_role_update(before, after):
         after.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     await send_log(
         after.guild,
@@ -748,13 +1492,28 @@ async def on_guild_role_update(before, after):
 # =========================================================
 
 @bot.event
-async def on_member_update(before, after):
+async def on_member_update(
+    before,
+    after
+):
 
-    before_roles = set(before.roles)
-    after_roles = set(after.roles)
+    before_roles = set(
+        before.roles
+    )
 
-    added = after_roles - before_roles
-    removed = before_roles - after_roles
+    after_roles = set(
+        after.roles
+    )
+
+    added = (
+        after_roles
+        - before_roles
+    )
+
+    removed = (
+        before_roles
+        - after_roles
+    )
 
     if not added and not removed:
         return
@@ -767,7 +1526,11 @@ async def on_member_update(before, after):
         after.id
     )
 
-    executor = entry.user if entry else None
+    executor = (
+        entry.user
+        if entry
+        else None
+    )
 
     executor_text = (
         executor.mention
@@ -816,7 +1579,9 @@ async def on_member_update(before, after):
 # LOG CHANNEL SELECT
 # =========================================================
 
-class LogChannelSelect(discord.ui.ChannelSelect):
+class LogChannelSelect(
+    discord.ui.ChannelSelect
+):
 
     def __init__(self, log_type):
 
@@ -831,7 +1596,10 @@ class LogChannelSelect(discord.ui.ChannelSelect):
             max_values=1
         )
 
-    async def callback(self, interaction):
+    async def callback(
+        self,
+        interaction
+    ):
 
         ensure_guild_settings(
             interaction.guild.id
@@ -855,20 +1623,27 @@ class LogChannelSelect(discord.ui.ChannelSelect):
         con.close()
 
         await interaction.response.send_message(
-            f"✅ تم تحديد {LOG_TYPES[self.log_type]}: "
+            f"✅ تم تحديد "
+            f"{LOG_TYPES[self.log_type]}: "
             f"{self.values[0].mention}",
             ephemeral=True
         )
 
 
-class LogChannelView(discord.ui.View):
+class LogChannelView(
+    discord.ui.View
+):
 
     def __init__(self, log_type):
 
-        super().__init__(timeout=60)
+        super().__init__(
+            timeout=60
+        )
 
         self.add_item(
-            LogChannelSelect(log_type)
+            LogChannelSelect(
+                log_type
+            )
         )
 
 
@@ -876,7 +1651,9 @@ class LogChannelView(discord.ui.View):
 # LOG TYPE SELECT
 # =========================================================
 
-class LogTypeSelect(discord.ui.Select):
+class LogTypeSelect(
+    discord.ui.Select
+):
 
     def __init__(self):
 
@@ -899,22 +1676,32 @@ class LogTypeSelect(discord.ui.Select):
             options=options
         )
 
-    async def callback(self, interaction):
+    async def callback(
+        self,
+        interaction
+    ):
 
         log_type = self.values[0]
 
         await interaction.response.send_message(
-            f"اختر روم {LOG_TYPES[log_type]}:",
-            view=LogChannelView(log_type),
+            f"اختر روم "
+            f"{LOG_TYPES[log_type]}:",
+            view=LogChannelView(
+                log_type
+            ),
             ephemeral=True
         )
 
 
-class LogTypeView(discord.ui.View):
+class LogTypeView(
+    discord.ui.View
+):
 
     def __init__(self):
 
-        super().__init__(timeout=60)
+        super().__init__(
+            timeout=60
+        )
 
         self.add_item(
             LogTypeSelect()
@@ -925,9 +1712,14 @@ class LogTypeView(discord.ui.View):
 # AUTO ROLE SELECT
 # =========================================================
 
-class AutoRoleSelect(discord.ui.RoleSelect):
+class AutoRoleSelect(
+    discord.ui.RoleSelect
+):
 
-    def __init__(self, role_type):
+    def __init__(
+        self,
+        role_type
+    ):
 
         self.role_type = role_type
 
@@ -937,9 +1729,13 @@ class AutoRoleSelect(discord.ui.RoleSelect):
             max_values=1
         )
 
-    async def callback(self, interaction):
+    async def callback(
+        self,
+        interaction
+    ):
 
         role = self.values[0]
+
         me = interaction.guild.me
 
         if not me.guild_permissions.manage_roles:
@@ -965,7 +1761,8 @@ class AutoRoleSelect(discord.ui.RoleSelect):
             )
 
             text = (
-                f"تم تحديد رتبة الأعضاء التلقائية: "
+                "تم تحديد رتبة الأعضاء "
+                "التلقائية: "
                 f"{role.mention}"
             )
 
@@ -978,7 +1775,8 @@ class AutoRoleSelect(discord.ui.RoleSelect):
             )
 
             text = (
-                f"تم تحديد رتبة البوتات التلقائية: "
+                "تم تحديد رتبة البوتات "
+                "التلقائية: "
                 f"{role.mention}"
             )
 
@@ -988,14 +1786,90 @@ class AutoRoleSelect(discord.ui.RoleSelect):
         )
 
 
-class AutoRoleView(discord.ui.View):
+class AutoRoleView(
+    discord.ui.View
+):
 
-    def __init__(self, role_type):
+    def __init__(
+        self,
+        role_type
+    ):
 
-        super().__init__(timeout=60)
+        super().__init__(
+            timeout=60
+        )
 
         self.add_item(
-            AutoRoleSelect(role_type)
+            AutoRoleSelect(
+                role_type
+            )
+        )
+
+
+# =========================================================
+# WELCOME CHANNEL SELECT
+# =========================================================
+
+class WelcomeChannelSelect(
+    discord.ui.ChannelSelect
+):
+
+    def __init__(self):
+
+        super().__init__(
+            placeholder="اختر روم الترحيب",
+            channel_types=[
+                discord.ChannelType.text
+            ],
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(
+        self,
+        interaction
+    ):
+
+        ensure_welcome_settings(
+            interaction.guild.id
+        )
+
+        con = db()
+
+        con.execute(
+            """
+            UPDATE welcome_settings
+            SET channel_id = ?
+            WHERE guild_id = ?
+            """,
+            (
+                self.values[0].id,
+                interaction.guild.id
+            )
+        )
+
+        con.commit()
+        con.close()
+
+        await interaction.response.send_message(
+            f"✅ تم تحديد روم الترحيب: "
+            f"{self.values[0].mention}",
+            ephemeral=True
+        )
+
+
+class WelcomeChannelView(
+    discord.ui.View
+):
+
+    def __init__(self):
+
+        super().__init__(
+            timeout=60
+        )
+
+        self.add_item(
+            WelcomeChannelSelect()
         )
 
 
@@ -1007,7 +1881,9 @@ class AutoRoleView(discord.ui.View):
     name="تحديد_اللوق",
     description="تحديد روم لقسم من أقسام اللوق"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
 async def set_log(interaction):
 
     await interaction.response.send_message(
@@ -1021,8 +1897,12 @@ async def set_log(interaction):
     name="رتبة_تلقائية_عضو",
     description="تحديد الرتبة التلقائية للأعضاء"
 )
-@app_commands.checks.has_permissions(administrator=True)
-async def auto_member_role(interaction):
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def auto_member_role(
+    interaction
+):
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها العضو تلقائيًا:",
@@ -1035,8 +1915,12 @@ async def auto_member_role(interaction):
     name="رتبة_تلقائية_بوت",
     description="تحديد الرتبة التلقائية للبوتات"
 )
-@app_commands.checks.has_permissions(administrator=True)
-async def auto_bot_role(interaction):
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def auto_bot_role(
+    interaction
+):
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها البوت تلقائيًا:",
@@ -1049,8 +1933,12 @@ async def auto_bot_role(interaction):
     name="اعدادات_اللوق",
     description="عرض إعدادات اللوقات"
 )
-@app_commands.checks.has_permissions(administrator=True)
-async def log_settings(interaction):
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def log_settings(
+    interaction
+):
 
     ensure_guild_settings(
         interaction.guild.id
@@ -1076,10 +1964,14 @@ async def log_settings(interaction):
 
     for key, name in LOG_TYPES.items():
 
-        channel_id = row[f"{key}_log"]
+        channel_id = row[
+            f"{key}_log"
+        ]
 
         channel = (
-            interaction.guild.get_channel(channel_id)
+            interaction.guild.get_channel(
+                int(channel_id)
+            )
             if channel_id
             else None
         )
@@ -1093,6 +1985,181 @@ async def log_settings(interaction):
             ),
             inline=False
         )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+
+# =========================================================
+# WELCOME COMMAND
+# =========================================================
+
+@bot.tree.command(
+    name="تحديد_روم_الترحيب",
+    description="تحديد الروم الذي ترسل فيه الترحيبات"
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def set_welcome_channel(
+    interaction
+):
+
+    await interaction.response.send_message(
+        "اختر روم الترحيب:",
+        view=WelcomeChannelView(),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="الترحيب",
+    description="تشغيل أو إيقاف نظام الترحيب"
+)
+@app_commands.describe(
+    الحالة="تشغيل أو إيقاف الترحيب"
+)
+@app_commands.choices(
+    الحالة=[
+        app_commands.Choice(
+            name="تشغيل",
+            value="on"
+        ),
+        app_commands.Choice(
+            name="إيقاف",
+            value="off"
+        )
+    ]
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def welcome_toggle(
+    interaction,
+    الحالة: app_commands.Choice[str]
+):
+
+    ensure_welcome_settings(
+        interaction.guild.id
+    )
+
+    enabled = (
+        1
+        if الحالة.value == "on"
+        else 0
+    )
+
+    con = db()
+
+    con.execute(
+        """
+        UPDATE welcome_settings
+        SET enabled = ?
+        WHERE guild_id = ?
+        """,
+        (
+            enabled,
+            interaction.guild.id
+        )
+    )
+
+    con.commit()
+    con.close()
+
+    text = (
+        "🟢 تم تشغيل نظام الترحيب."
+        if enabled
+        else
+        "🔴 تم إيقاف نظام الترحيب."
+    )
+
+    await interaction.response.send_message(
+        text,
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="اعدادات_الترحيب",
+    description="عرض إعدادات الترحيب الحالية"
+)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
+async def welcome_settings_command(
+    interaction
+):
+
+    row = get_welcome_settings(
+        interaction.guild.id
+    )
+
+    channel = None
+
+    if row["channel_id"]:
+
+        channel = (
+            interaction.guild.get_channel(
+                int(row["channel_id"])
+            )
+        )
+
+    embed = discord.Embed(
+        title="👋 إعدادات الترحيب",
+        color=discord.Color.dark_red()
+    )
+
+    embed.add_field(
+        name="الحالة",
+        value=(
+            "🟢 مفعّل"
+            if row["enabled"]
+            else "🔴 متوقف"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="روم الترحيب",
+        value=(
+            channel.mention
+            if channel
+            else "غير محدد"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="الخلفية",
+        value=(
+            "محددة"
+            if row["background_url"]
+            else "غير محددة"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="صورة العضو",
+        value=(
+            "مفعلة"
+            if row["show_avatar"]
+            else "متوقفة"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="اسم العضو",
+        value=(
+            "مفعل"
+            if row["show_username"]
+            else "متوقف"
+        ),
+        inline=True
+    )
 
     await interaction.response.send_message(
         embed=embed,
@@ -1135,6 +2202,12 @@ async def warning_watcher_task():
 
         con = db()
 
+        minimum_id = (
+            min(last_warning_id.values())
+            if last_warning_id
+            else 0
+        )
+
         rows = con.execute(
             """
             SELECT *
@@ -1142,11 +2215,7 @@ async def warning_watcher_task():
             WHERE id > ?
             ORDER BY id ASC
             """,
-            (
-                min(last_warning_id.values())
-                if last_warning_id
-                else 0
-            )
+            (minimum_id,)
         ).fetchall()
 
         con.close()
@@ -1154,6 +2223,7 @@ async def warning_watcher_task():
         for row in rows:
 
             guild_id = row["guild_id"]
+
             warning_id = row["id"]
 
             old_id = last_warning_id.get(
@@ -1168,13 +2238,20 @@ async def warning_watcher_task():
                 guild_id
             ] = warning_id
 
-            guild = bot.get_guild(guild_id)
+            guild = bot.get_guild(
+                guild_id
+            )
 
             if not guild:
                 continue
 
-            user = guild.get_member(row["user_id"])
-            moderator = guild.get_member(row["moderator_id"])
+            user = guild.get_member(
+                row["user_id"]
+            )
+
+            moderator = guild.get_member(
+                row["moderator_id"]
+            )
 
             user_text = (
                 user.mention
@@ -1223,10 +2300,17 @@ async def load_systems():
 
     systems_folder = "systems"
 
-    if not os.path.exists(systems_folder):
-        os.makedirs(systems_folder)
+    if not os.path.exists(
+        systems_folder
+    ):
 
-    for filename in os.listdir(systems_folder):
+        os.makedirs(
+            systems_folder
+        )
+
+    for filename in os.listdir(
+        systems_folder
+    ):
 
         if not filename.endswith(".py"):
             continue
@@ -1235,11 +2319,17 @@ async def load_systems():
             continue
 
         module_name = filename[:-3]
-        extension = f"{systems_folder}.{module_name}"
+
+        extension = (
+            f"{systems_folder}."
+            f"{module_name}"
+        )
 
         try:
 
-            await bot.load_extension(extension)
+            await bot.load_extension(
+                extension
+            )
 
             print(
                 f"✅ Loaded: {extension}"
@@ -1264,8 +2354,15 @@ async def load_systems():
 async def on_ready():
 
     print("━━━━━━━━━━━━━━━━━━━━")
-    print(f"🤖 Bot: {bot.user}")
-    print("🟢 CTRP System Online")
+
+    print(
+        f"🤖 Bot: {bot.user}"
+    )
+
+    print(
+        "🟢 CTRP System Online"
+    )
+
     print("━━━━━━━━━━━━━━━━━━━━")
 
     try:
@@ -1273,7 +2370,8 @@ async def on_ready():
         synced = await bot.tree.sync()
 
         print(
-            f"✅ Synced {len(synced)} slash commands"
+            f"✅ Synced "
+            f"{len(synced)} slash commands"
         )
 
     except Exception as e:
@@ -1291,14 +2389,19 @@ async def main():
 
     init_db()
 
+    init_welcome_db()
+
     prepare_warning_ids()
 
     await load_systems()
 
     if not warning_watcher_task.is_running():
+
         warning_watcher_task.start()
 
-    await bot.start(TOKEN)
+    await bot.start(
+        TOKEN
+    )
 
 
 # =========================================================
@@ -1314,4 +2417,6 @@ if __name__ == "__main__":
 
     web_thread.start()
 
-    asyncio.run(main())
+    asyncio.run(
+        main()
+    )
