@@ -1,1 +1,4 @@
+Flask
 discord.py
+requests
+Pillow
