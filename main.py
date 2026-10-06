@@ -1,13 +1,28 @@
+# =========================================================
+# CTRP SYSTEM
+# main.py
+# FULL VERSION
+# =========================================================
+
 import os
 import io
+import json
 import asyncio
 import threading
 import sqlite3
+
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
 
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+from PIL import (
+    Image,
+    ImageDraw,
+    ImageFont,
+    ImageOps
+)
 
 import discord
 from discord import app_commands
@@ -20,14 +35,20 @@ from database import init_db
 # DATABASE
 # =========================================================
 
-init_db()
-
 DB_FILE = "ctrp_system.db"
+
+init_db()
 
 
 def db():
-    con = sqlite3.connect(DB_FILE)
+
+    con = sqlite3.connect(
+        DB_FILE,
+        timeout=30
+    )
+
     con.row_factory = sqlite3.Row
+
     return con
 
 
@@ -35,53 +56,883 @@ def db():
 # TOKEN
 # =========================================================
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv(
+    "DISCORD_TOKEN"
+)
 
 if not TOKEN:
+
     raise RuntimeError(
         "DISCORD_TOKEN غير موجود في Environment Variables"
     )
 
 
 # =========================================================
+# PANEL API
+# =========================================================
+
+PANEL_SECRET = os.getenv(
+    "CT_PANEL_SECRET"
+)
+
+PANEL_ORIGIN = os.getenv(
+    "CT_PANEL_ORIGIN",
+    "*"
+)
+
+
+# =========================================================
 # RENDER PORT
 # =========================================================
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(
+    os.getenv(
+        "PORT",
+        "10000"
+    )
+)
 
 
-class HealthHandler(BaseHTTPRequestHandler):
+# =========================================================
+# WELCOME DATABASE
+# =========================================================
 
-    def do_GET(self):
+def init_welcome_db():
 
-        self.send_response(200)
+    con = db()
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS welcome_settings
+        (
+            guild_id INTEGER PRIMARY KEY,
+
+            enabled INTEGER DEFAULT 0,
+
+            channel_id INTEGER,
+
+            background_url TEXT,
+
+            background_x REAL DEFAULT 50,
+            background_y REAL DEFAULT 50,
+            background_scale REAL DEFAULT 100,
+
+            show_avatar INTEGER DEFAULT 1,
+
+            avatar_x REAL DEFAULT 50,
+            avatar_y REAL DEFAULT 50,
+            avatar_size REAL DEFAULT 180,
+
+            avatar_shape TEXT DEFAULT 'circle',
+
+            avatar_rotation REAL DEFAULT 0,
+            avatar_opacity REAL DEFAULT 100,
+
+            avatar_border_enabled INTEGER DEFAULT 0,
+            avatar_border_width REAL DEFAULT 0,
+            avatar_border_color TEXT DEFAULT '#FFFFFF',
+
+            show_username INTEGER DEFAULT 1,
+
+            username_x REAL DEFAULT 50,
+            username_y REAL DEFAULT 78,
+
+            username_size REAL DEFAULT 48,
+
+            username_color TEXT DEFAULT '#FFFFFF',
+
+            message TEXT DEFAULT
+                'مرحباً {mention} في {server}',
+
+            image_width INTEGER DEFAULT 1024,
+            image_height INTEGER DEFAULT 400
+        )
+        """
+    )
+
+    con.commit()
+
+    # -----------------------------------------------------
+    # MIGRATION
+    # -----------------------------------------------------
+
+    existing_columns = {
+        row["name"]
+        for row in con.execute(
+            "PRAGMA table_info(welcome_settings)"
+        ).fetchall()
+    }
+
+    columns_to_add = {
+
+        "background_x":
+            "REAL DEFAULT 50",
+
+        "background_y":
+            "REAL DEFAULT 50",
+
+        "background_scale":
+            "REAL DEFAULT 100",
+
+        "avatar_rotation":
+            "REAL DEFAULT 0",
+
+        "avatar_opacity":
+            "REAL DEFAULT 100",
+
+        "avatar_border_enabled":
+            "INTEGER DEFAULT 0",
+
+        "avatar_border_width":
+            "REAL DEFAULT 0",
+
+        "avatar_border_color":
+            "TEXT DEFAULT '#FFFFFF'"
+    }
+
+    for column, definition in columns_to_add.items():
+
+        if column not in existing_columns:
+
+            con.execute(
+                f"""
+                ALTER TABLE welcome_settings
+                ADD COLUMN {column} {definition}
+                """
+            )
+
+    con.commit()
+    con.close()
+
+
+init_welcome_db()
+
+
+# =========================================================
+# WELCOME SETTINGS
+# =========================================================
+
+def ensure_welcome_settings(
+    guild_id: int
+):
+
+    con = db()
+
+    con.execute(
+        """
+        INSERT OR IGNORE INTO welcome_settings
+        (
+            guild_id,
+            enabled,
+            channel_id,
+
+            background_url,
+            background_x,
+            background_y,
+            background_scale,
+
+            show_avatar,
+
+            avatar_x,
+            avatar_y,
+            avatar_size,
+            avatar_shape,
+            avatar_rotation,
+            avatar_opacity,
+
+            avatar_border_enabled,
+            avatar_border_width,
+            avatar_border_color,
+
+            show_username,
+
+            username_x,
+            username_y,
+            username_size,
+            username_color,
+
+            message,
+
+            image_width,
+            image_height
+        )
+        VALUES
+        (
+            ?,
+            0,
+            NULL,
+
+            NULL,
+            50,
+            50,
+            100,
+
+            1,
+
+            50,
+            50,
+            180,
+            'circle',
+            0,
+            100,
+
+            0,
+            0,
+            '#FFFFFF',
+
+            1,
+
+            50,
+            78,
+            48,
+            '#FFFFFF',
+
+            'مرحباً {mention} في {server}',
+
+            1024,
+            400
+        )
+        """,
+        (guild_id,)
+    )
+
+    con.commit()
+    con.close()
+
+
+def get_welcome_settings(
+    guild_id: int
+):
+
+    ensure_welcome_settings(
+        guild_id
+    )
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT *
+        FROM welcome_settings
+        WHERE guild_id = ?
+        """,
+        (guild_id,)
+    ).fetchone()
+
+    con.close()
+
+    return row
+
+
+# =========================================================
+# SAVE WELCOME SETTINGS
+# =========================================================
+
+def save_welcome_settings(
+    guild_id: int,
+    data: dict
+):
+
+    ensure_welcome_settings(
+        guild_id
+    )
+
+    allowed = {
+
+        "enabled",
+
+        "channel_id",
+
+        "background_url",
+        "background_x",
+        "background_y",
+        "background_scale",
+
+        "show_avatar",
+
+        "avatar_x",
+        "avatar_y",
+        "avatar_size",
+        "avatar_shape",
+        "avatar_rotation",
+        "avatar_opacity",
+
+        "avatar_border_enabled",
+        "avatar_border_width",
+        "avatar_border_color",
+
+        "show_username",
+
+        "username_x",
+        "username_y",
+        "username_size",
+        "username_color",
+
+        "message",
+
+        "image_width",
+        "image_height"
+    }
+
+    updates = []
+
+    values = []
+
+    for key, value in data.items():
+
+        if key not in allowed:
+            continue
+
+        updates.append(
+            f"{key} = ?"
+        )
+
+        values.append(
+            value
+        )
+
+    if not updates:
+        return False
+
+    values.append(
+        guild_id
+    )
+
+    con = db()
+
+    con.execute(
+        f"""
+        UPDATE welcome_settings
+        SET {", ".join(updates)}
+        WHERE guild_id = ?
+        """,
+        values
+    )
+
+    con.commit()
+    con.close()
+
+    return True
+
+
+# =========================================================
+# VALIDATE WELCOME SETTINGS
+# =========================================================
+
+def validate_welcome_data(
+    data: dict
+):
+
+    clean = {}
+
+    if "enabled" in data:
+
+        clean["enabled"] = (
+            1
+            if bool(data["enabled"])
+            else 0
+        )
+
+    if "channel_id" in data:
+
+        value = data["channel_id"]
+
+        if value in (
+            None,
+            "",
+            0,
+            "0"
+        ):
+
+            clean["channel_id"] = None
+
+        else:
+
+            clean["channel_id"] = int(
+                value
+            )
+
+    if "background_url" in data:
+
+        url = str(
+            data["background_url"]
+            or ""
+        ).strip()
+
+        if url:
+
+            parsed = urlparse(url)
+
+            if parsed.scheme not in (
+                "http",
+                "https"
+            ):
+
+                raise ValueError(
+                    "رابط الخلفية يجب أن يكون HTTP أو HTTPS"
+                )
+
+        clean["background_url"] = (
+            url or None
+        )
+
+    numeric_ranges = {
+
+        "background_x":
+            (-500, 1500),
+
+        "background_y":
+            (-500, 1500),
+
+        "background_scale":
+            (10, 500),
+
+        "avatar_x":
+            (-500, 1500),
+
+        "avatar_y":
+            (-500, 1500),
+
+        "avatar_size":
+            (20, 1500),
+
+        "avatar_rotation":
+            (-360, 360),
+
+        "avatar_opacity":
+            (0, 100),
+
+        "avatar_border_width":
+            (0, 100),
+
+        "username_x":
+            (-500, 1500),
+
+        "username_y":
+            (-500, 1500),
+
+        "username_size":
+            (10, 500),
+
+        "image_width":
+            (400, 3000),
+
+        "image_height":
+            (200, 2000)
+    }
+
+    for key, (
+        minimum,
+        maximum
+    ) in numeric_ranges.items():
+
+        if key not in data:
+            continue
+
+        value = float(
+            data[key]
+        )
+
+        value = max(
+            minimum,
+            min(
+                value,
+                maximum
+            )
+        )
+
+        if key in (
+            "image_width",
+            "image_height"
+        ):
+
+            value = int(value)
+
+        clean[key] = value
+
+    if "avatar_shape" in data:
+
+        shape = str(
+            data["avatar_shape"]
+        ).lower()
+
+        if shape not in (
+            "circle",
+            "square",
+            "rounded"
+        ):
+
+            shape = "circle"
+
+        clean[
+            "avatar_shape"
+        ] = shape
+
+    boolean_fields = [
+
+        "show_avatar",
+        "avatar_border_enabled",
+        "show_username"
+    ]
+
+    for key in boolean_fields:
+
+        if key in data:
+
+            clean[key] = (
+                1
+                if bool(data[key])
+                else 0
+            )
+
+    color_fields = [
+
+        "username_color",
+        "avatar_border_color"
+    ]
+
+    for key in color_fields:
+
+        if key in data:
+
+            clean[key] = safe_color(
+                data[key]
+            )
+
+    if "message" in data:
+
+        message = str(
+            data["message"]
+            or ""
+        )
+
+        if len(message) > 2000:
+
+            message = message[:2000]
+
+        clean["message"] = message
+
+    return clean
+
+
+# =========================================================
+# HTTP API
+# =========================================================
+
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
+
+    def send_json(
+        self,
+        status: int,
+        data: dict
+    ):
+
+        body = json.dumps(
+            data,
+            ensure_ascii=False
+        ).encode(
+            "utf-8"
+        )
+
+        self.send_response(
+            status
+        )
 
         self.send_header(
             "Content-Type",
-            "text/plain; charset=utf-8"
+            "application/json; charset=utf-8"
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            PANEL_ORIGIN
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-CT-PANEL-SECRET"
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS"
         )
 
         self.end_headers()
 
         self.wfile.write(
-            b"CTRP Bot is Online!"
+            body
         )
 
-    def log_message(self, format, *args):
+    def do_OPTIONS(self):
+
+        self.send_response(
+            204
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            PANEL_ORIGIN
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-CT-PANEL-SECRET"
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS"
+        )
+
+        self.end_headers()
+
+    def do_GET(self):
+
+        parsed = urlparse(
+            self.path
+        )
+
+        path = parsed.path
+
+        # -------------------------------------------------
+        # HEALTH
+        # -------------------------------------------------
+
+        if path in (
+            "/",
+            "/health"
+        ):
+
+            self.send_json(
+                200,
+                {
+                    "status": "online",
+                    "bot": "CTRP Bot"
+                }
+            )
+
+            return
+
+        # -------------------------------------------------
+        # WELCOME GET
+        # -------------------------------------------------
+
+        if path.startswith(
+            "/api/welcome/"
+        ):
+
+            try:
+
+                guild_id = int(
+                    path.split(
+                        "/"
+                    )[-1]
+                )
+
+                row = get_welcome_settings(
+                    guild_id
+                )
+
+                data = dict(
+                    row
+                )
+
+                self.send_json(
+                    200,
+                    {
+                        "success": True,
+                        "settings": data
+                    }
+                )
+
+            except Exception as e:
+
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "error": str(e)
+                    }
+                )
+
+            return
+
+        self.send_json(
+            404,
+            {
+                "success": False,
+                "error": "Not Found"
+            }
+        )
+
+    def do_POST(self):
+
+        parsed = urlparse(
+            self.path
+        )
+
+        path = parsed.path
+
+        # -------------------------------------------------
+        # SECRET
+        # -------------------------------------------------
+
+        if not PANEL_SECRET:
+
+            self.send_json(
+                503,
+                {
+                    "success": False,
+                    "error":
+                        "CT_PANEL_SECRET غير موجود"
+                }
+            )
+
+            return
+
+        received_secret = self.headers.get(
+            "X-CT-PANEL-SECRET",
+            ""
+        )
+
+        if received_secret != PANEL_SECRET:
+
+            self.send_json(
+                403,
+                {
+                    "success": False,
+                    "error": "Unauthorized"
+                }
+            )
+
+            return
+
+        # -------------------------------------------------
+        # WELCOME API
+        # -------------------------------------------------
+
+        if path.startswith(
+            "/api/welcome/"
+        ):
+
+            try:
+
+                guild_id = int(
+                    path.split(
+                        "/"
+                    )[-1]
+                )
+
+                content_length = int(
+                    self.headers.get(
+                        "Content-Length",
+                        "0"
+                    )
+                )
+
+                if content_length > 100000:
+
+                    self.send_json(
+                        413,
+                        {
+                            "success": False,
+                            "error":
+                                "الطلب كبير جدًا"
+                        }
+                    )
+
+                    return
+
+                raw = self.rfile.read(
+                    content_length
+                )
+
+                data = json.loads(
+                    raw.decode(
+                        "utf-8"
+                    )
+                )
+
+                clean = validate_welcome_data(
+                    data
+                )
+
+                save_welcome_settings(
+                    guild_id,
+                    clean
+                )
+
+                self.send_json(
+                    200,
+                    {
+                        "success": True,
+                        "message":
+                            "تم حفظ إعدادات الترحيب"
+                    }
+                )
+
+            except Exception as e:
+
+                self.send_json(
+                    400,
+                    {
+                        "success": False,
+                        "error": str(e)
+                    }
+                )
+
+            return
+
+        self.send_json(
+            404,
+            {
+                "success": False,
+                "error": "Not Found"
+            }
+        )
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+
         pass
 
 
 def start_web_server():
 
     server = HTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            PORT
+        ),
         HealthHandler
     )
 
-    print("━━━━━━━━━━━━━━━━━━━━")
-    print(f"🌐 Render Port: {PORT}")
-    print("🟢 Web Server Online")
-    print("━━━━━━━━━━━━━━━━━━━━")
+    print(
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    print(
+        f"🌐 Render Port: {PORT}"
+    )
+
+    print(
+        "🟢 Web/API Server Online"
+    )
+
+    print(
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
 
     server.serve_forever()
 
@@ -105,10 +956,12 @@ bot = commands.Bot(
 
 
 # =========================================================
-# SETTINGS
+# GENERAL SETTINGS
 # =========================================================
 
-def ensure_guild_settings(guild_id: int):
+def ensure_guild_settings(
+    guild_id: int
+):
 
     con = db()
 
@@ -123,7 +976,14 @@ def ensure_guild_settings(guild_id: int):
             auto_member_role,
             auto_bot_role
         )
-        VALUES (?, NULL, NULL, NULL, NULL, NULL)
+        VALUES (
+            ?,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL
+        )
         """,
         (guild_id,)
     )
@@ -148,9 +1008,20 @@ def ensure_guild_settings(guild_id: int):
             points_log
         )
         VALUES (
-            ?, NULL, NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL
+            ?,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL
         )
         """,
         (guild_id,)
@@ -160,9 +1031,13 @@ def ensure_guild_settings(guild_id: int):
     con.close()
 
 
-def get_settings(guild_id: int):
+def get_settings(
+    guild_id: int
+):
 
-    ensure_guild_settings(guild_id)
+    ensure_guild_settings(
+        guild_id
+    )
 
     con = db()
 
@@ -187,6 +1062,7 @@ def set_setting(
 ):
 
     allowed = {
+
         "log_channel",
         "broadcast_channel",
         "suggestion_channel",
@@ -197,7 +1073,9 @@ def set_setting(
     if column not in allowed:
         return
 
-    ensure_guild_settings(guild_id)
+    ensure_guild_settings(
+        guild_id
+    )
 
     con = db()
 
@@ -207,7 +1085,10 @@ def set_setting(
         SET {column} = ?
         WHERE guild_id = ?
         """,
-        (value, guild_id)
+        (
+            value,
+            guild_id
+        )
     )
 
     con.commit()
@@ -215,137 +1096,12 @@ def set_setting(
 
 
 # =========================================================
-# WELCOME DATABASE
+# IMAGE HELPERS
 # =========================================================
 
-def init_welcome_db():
-
-    con = db()
-
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS welcome_settings
-        (
-            guild_id INTEGER PRIMARY KEY,
-
-            enabled INTEGER DEFAULT 0,
-
-            channel_id INTEGER,
-
-            background_url TEXT,
-
-            show_avatar INTEGER DEFAULT 1,
-
-            avatar_x REAL DEFAULT 50,
-            avatar_y REAL DEFAULT 50,
-            avatar_size REAL DEFAULT 180,
-
-            avatar_shape TEXT DEFAULT 'circle',
-
-            show_username INTEGER DEFAULT 1,
-
-            username_x REAL DEFAULT 50,
-            username_y REAL DEFAULT 78,
-
-            username_size REAL DEFAULT 48,
-
-            username_color TEXT DEFAULT '#FFFFFF',
-
-            message TEXT DEFAULT
-                'مرحباً {mention} في {server}',
-
-            image_width INTEGER DEFAULT 1024,
-            image_height INTEGER DEFAULT 400
-        )
-        """
-    )
-
-    con.commit()
-    con.close()
-
-
-init_welcome_db()
-
-
-def ensure_welcome_settings(guild_id: int):
-
-    con = db()
-
-    con.execute(
-        """
-        INSERT OR IGNORE INTO welcome_settings
-        (
-            guild_id,
-            enabled,
-            channel_id,
-            background_url,
-            show_avatar,
-            avatar_x,
-            avatar_y,
-            avatar_size,
-            avatar_shape,
-            show_username,
-            username_x,
-            username_y,
-            username_size,
-            username_color,
-            message,
-            image_width,
-            image_height
-        )
-        VALUES
-        (
-            ?,
-            0,
-            NULL,
-            NULL,
-            1,
-            50,
-            50,
-            180,
-            'circle',
-            1,
-            50,
-            78,
-            48,
-            '#FFFFFF',
-            'مرحباً {mention} في {server}',
-            1024,
-            400
-        )
-        """,
-        (guild_id,)
-    )
-
-    con.commit()
-    con.close()
-
-
-def get_welcome_settings(guild_id: int):
-
-    ensure_welcome_settings(guild_id)
-
-    con = db()
-
-    row = con.execute(
-        """
-        SELECT *
-        FROM welcome_settings
-        WHERE guild_id = ?
-        """,
-        (guild_id,)
-    ).fetchone()
-
-    con.close()
-
-    return row
-
-
-# =========================================================
-# WELCOME IMAGE HELPERS
-# =========================================================
-
-def download_image(url: str):
+def download_image(
+    url: str
+):
 
     try:
 
@@ -353,17 +1109,22 @@ def download_image(url: str):
             url,
             timeout=15,
             headers={
-                "User-Agent": "CTRP-Bot/1.0"
+                "User-Agent":
+                    "CTRP-Bot/1.0"
             }
         )
 
         response.raise_for_status()
 
         image = Image.open(
-            io.BytesIO(response.content)
+            io.BytesIO(
+                response.content
+            )
         )
 
-        return image.convert("RGBA")
+        return image.convert(
+            "RGBA"
+        )
 
     except Exception as e:
 
@@ -374,27 +1135,32 @@ def download_image(url: str):
         return None
 
 
-def get_font(size: int, bold: bool = False):
-
-    fonts = []
+def get_font(
+    size: int,
+    bold: bool = False
+):
 
     if bold:
 
-        fonts.extend(
-            [
-                "DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            ]
-        )
+        fonts = [
+
+            "DejaVuSans-Bold.ttf",
+
+            "/usr/share/fonts/"
+            "truetype/dejavu/"
+            "DejaVuSans-Bold.ttf"
+        ]
 
     else:
 
-        fonts.extend(
-            [
-                "DejaVuSans.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-            ]
-        )
+        fonts = [
+
+            "DejaVuSans.ttf",
+
+            "/usr/share/fonts/"
+            "truetype/dejavu/"
+            "DejaVuSans.ttf"
+        ]
 
     for font_path in fonts:
 
@@ -418,24 +1184,39 @@ def create_circle_avatar(
 
     image = ImageOps.fit(
         image.convert("RGBA"),
-        (size, size),
+        (
+            size,
+            size
+        ),
         method=Image.Resampling.LANCZOS
     )
 
     mask = Image.new(
         "L",
-        (size, size),
+        (
+            size,
+            size
+        ),
         0
     )
 
-    mask_draw = ImageDraw.Draw(mask)
+    draw = ImageDraw.Draw(
+        mask
+    )
 
-    mask_draw.ellipse(
-        (0, 0, size - 1, size - 1),
+    draw.ellipse(
+        (
+            0,
+            0,
+            size - 1,
+            size - 1
+        ),
         fill=255
     )
 
-    image.putalpha(mask)
+    image.putalpha(
+        mask
+    )
 
     return image
 
@@ -447,56 +1228,362 @@ def create_rounded_avatar(
 
     image = ImageOps.fit(
         image.convert("RGBA"),
-        (size, size),
+        (
+            size,
+            size
+        ),
         method=Image.Resampling.LANCZOS
     )
 
     mask = Image.new(
         "L",
-        (size, size),
+        (
+            size,
+            size
+        ),
         0
     )
 
-    mask_draw = ImageDraw.Draw(mask)
+    draw = ImageDraw.Draw(
+        mask
+    )
 
     radius = max(
         10,
         int(size * 0.18)
     )
 
-    mask_draw.rounded_rectangle(
-        (0, 0, size - 1, size - 1),
+    draw.rounded_rectangle(
+        (
+            0,
+            0,
+            size - 1,
+            size - 1
+        ),
         radius=radius,
         fill=255
     )
 
-    image.putalpha(mask)
+    image.putalpha(
+        mask
+    )
 
     return image
 
 
-def safe_color(value, fallback="#FFFFFF"):
+def safe_color(
+    value,
+    fallback="#FFFFFF"
+):
 
     if not value:
         return fallback
 
     try:
 
-        value = str(value).strip()
+        value = str(
+            value
+        ).strip()
 
-        if not value.startswith("#"):
+        if not value.startswith(
+            "#"
+        ):
+
             value = "#" + value
 
         if len(value) != 7:
+
             return fallback
 
-        int(value[1:], 16)
+        int(
+            value[1:],
+            16
+        )
 
         return value
 
     except Exception:
 
         return fallback
+
+
+# =========================================================
+# APPLY OPACITY
+# =========================================================
+
+def apply_opacity(
+    image: Image.Image,
+    opacity: float
+):
+
+    opacity = max(
+        0,
+        min(
+            float(opacity),
+            100
+        )
+    )
+
+    alpha = image.getchannel(
+        "A"
+    )
+
+    alpha = alpha.point(
+        lambda value:
+            int(
+                value *
+                (
+                    opacity /
+                    100
+                )
+            )
+    )
+
+    image.putalpha(
+        alpha
+    )
+
+    return image
+
+
+# =========================================================
+# CREATE BORDER
+# =========================================================
+
+def add_avatar_border(
+    avatar: Image.Image,
+    shape: str,
+    width: int,
+    color: str
+):
+
+    if width <= 0:
+
+        return avatar
+
+    width = min(
+        width,
+        100
+    )
+
+    original_size = avatar.width
+
+    total_size = (
+        original_size
+        + width * 2
+    )
+
+    layer = Image.new(
+        "RGBA",
+        (
+            total_size,
+            total_size
+        ),
+        (
+            0,
+            0,
+            0,
+            0
+        )
+    )
+
+    draw = ImageDraw.Draw(
+        layer
+    )
+
+    color = safe_color(
+        color,
+        "#FFFFFF"
+    )
+
+    if shape == "circle":
+
+        draw.ellipse(
+            (
+                0,
+                0,
+                total_size - 1,
+                total_size - 1
+            ),
+            fill=color
+        )
+
+    elif shape == "rounded":
+
+        radius = int(
+            total_size * 0.18
+        )
+
+        draw.rounded_rectangle(
+            (
+                0,
+                0,
+                total_size - 1,
+                total_size - 1
+            ),
+            radius=radius,
+            fill=color
+        )
+
+    else:
+
+        draw.rectangle(
+            (
+                0,
+                0,
+                total_size - 1,
+                total_size - 1
+            ),
+            fill=color
+        )
+
+    layer.alpha_composite(
+        avatar,
+        (
+            width,
+            width
+        )
+    )
+
+    return layer
+
+
+# =========================================================
+# BACKGROUND
+# =========================================================
+
+def prepare_background(
+    background,
+    width,
+    height,
+    settings
+):
+
+    if not background:
+
+        return Image.new(
+            "RGBA",
+            (
+                width,
+                height
+            ),
+            (
+                12,
+                12,
+                12,
+                255
+            )
+        )
+
+    scale = float(
+        settings["background_scale"]
+        or 100
+    )
+
+    scale = max(
+        10,
+        min(
+            scale,
+            500
+        )
+    )
+
+    base_scale = max(
+        width / background.width,
+        height / background.height
+    )
+
+    final_scale = (
+        base_scale
+        * (
+            scale /
+            100
+        )
+    )
+
+    new_width = max(
+        1,
+        int(
+            background.width
+            * final_scale
+        )
+    )
+
+    new_height = max(
+        1,
+        int(
+            background.height
+            * final_scale
+        )
+    )
+
+    background = background.resize(
+        (
+            new_width,
+            new_height
+        ),
+        Image.Resampling.LANCZOS
+    )
+
+    canvas = Image.new(
+        "RGBA",
+        (
+            width,
+            height
+        ),
+        (
+            12,
+            12,
+            12,
+            255
+        )
+    )
+
+    x_percent = float(
+        settings["background_x"]
+        or 50
+    )
+
+    y_percent = float(
+        settings["background_y"]
+        or 50
+    )
+
+    x = int(
+        (
+            width
+            -
+            new_width
+        )
+        *
+        (
+            x_percent /
+            100
+        )
+    )
+
+    y = int(
+        (
+            height
+            -
+            new_height
+        )
+        *
+        (
+            y_percent /
+            100
+        )
+    )
+
+    canvas.alpha_composite(
+        background,
+        (
+            x,
+            y
+        )
+    )
+
+    return canvas
 
 
 # =========================================================
@@ -509,30 +1596,40 @@ def make_welcome_image(
 ):
 
     width = int(
-        settings["image_width"] or 1024
+        settings["image_width"]
+        or 1024
     )
 
     height = int(
-        settings["image_height"] or 400
+        settings["image_height"]
+        or 400
     )
 
     width = max(
         400,
-        min(width, 3000)
+        min(
+            width,
+            3000
+        )
     )
 
     height = max(
         200,
-        min(height, 2000)
+        min(
+            height,
+            2000
+        )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # BACKGROUND
-    # -----------------------------------------------------
+    # =====================================================
 
     background = None
 
-    background_url = settings["background_url"]
+    background_url = (
+        settings["background_url"]
+    )
 
     if background_url:
 
@@ -540,29 +1637,20 @@ def make_welcome_image(
             background_url
         )
 
-    if background:
+    canvas = prepare_background(
+        background,
+        width,
+        height,
+        settings
+    )
 
-        background = ImageOps.fit(
-            background,
-            (width, height),
-            method=Image.Resampling.LANCZOS
-        )
+    draw = ImageDraw.Draw(
+        canvas
+    )
 
-    else:
-
-        background = Image.new(
-            "RGBA",
-            (width, height),
-            (12, 12, 12, 255)
-        )
-
-    canvas = background.convert("RGBA")
-
-    draw = ImageDraw.Draw(canvas)
-
-    # -----------------------------------------------------
+    # =====================================================
     # AVATAR
-    # -----------------------------------------------------
+    # =====================================================
 
     if settings["show_avatar"]:
 
@@ -581,12 +1669,16 @@ def make_welcome_image(
             if avatar:
 
                 avatar_size = int(
-                    settings["avatar_size"] or 180
+                    settings["avatar_size"]
+                    or 180
                 )
 
                 avatar_size = max(
-                    40,
-                    min(avatar_size, 1000)
+                    20,
+                    min(
+                        avatar_size,
+                        1500
+                    )
                 )
 
                 shape = (
@@ -596,9 +1688,11 @@ def make_welcome_image(
 
                 if shape == "rounded":
 
-                    avatar = create_rounded_avatar(
-                        avatar,
-                        avatar_size
+                    avatar = (
+                        create_rounded_avatar(
+                            avatar,
+                            avatar_size
+                        )
                     )
 
                 elif shape == "square":
@@ -609,177 +1703,322 @@ def make_welcome_image(
                             avatar_size,
                             avatar_size
                         ),
-                        method=Image.Resampling.LANCZOS
+                        method=
+                            Image.Resampling.LANCZOS
                     )
 
                 else:
 
-                    avatar = create_circle_avatar(
-                        avatar,
-                        avatar_size
+                    avatar = (
+                        create_circle_avatar(
+                            avatar,
+                            avatar_size
+                        )
                     )
+
+                # -------------------------------------------------
+                # BORDER
+                # -------------------------------------------------
+
+                if settings[
+                    "avatar_border_enabled"
+                ]:
+
+                    avatar = (
+                        add_avatar_border(
+                            avatar,
+                            shape,
+                            int(
+                                settings[
+                                    "avatar_border_width"
+                                ]
+                                or 0
+                            ),
+                            settings[
+                                "avatar_border_color"
+                            ]
+                        )
+                    )
+
+                # -------------------------------------------------
+                # ROTATION
+                # -------------------------------------------------
+
+                rotation = float(
+                    settings[
+                        "avatar_rotation"
+                    ]
+                    or 0
+                )
+
+                if rotation:
+
+                    avatar = avatar.rotate(
+                        rotation,
+                        expand=True,
+                        resample=
+                            Image.Resampling.BICUBIC
+                    )
+
+                # -------------------------------------------------
+                # OPACITY
+                # -------------------------------------------------
+
+                avatar = apply_opacity(
+                    avatar,
+                    float(
+                        settings[
+                            "avatar_opacity"
+                        ]
+                        or 100
+                    )
+                )
+
+                # -------------------------------------------------
+                # POSITION
+                # -------------------------------------------------
 
                 avatar_x = float(
                     settings["avatar_x"]
-                    if settings["avatar_x"] is not None
+                    if settings[
+                        "avatar_x"
+                    ] is not None
                     else 50
                 )
 
                 avatar_y = float(
                     settings["avatar_y"]
-                    if settings["avatar_y"] is not None
+                    if settings[
+                        "avatar_y"
+                    ] is not None
                     else 50
                 )
 
                 x = int(
-                    width *
-                    (avatar_x / 100)
+                    width
+                    *
+                    (
+                        avatar_x /
+                        100
+                    )
                     -
-                    avatar_size / 2
+                    avatar.width /
+                    2
                 )
 
                 y = int(
-                    height *
-                    (avatar_y / 100)
+                    height
+                    *
+                    (
+                        avatar_y /
+                        100
+                    )
                     -
-                    avatar_size / 2
+                    avatar.height /
+                    2
                 )
 
                 canvas.alpha_composite(
                     avatar,
-                    (x, y)
+                    (
+                        x,
+                        y
+                    )
                 )
 
         except Exception as e:
 
             print(
-                f"❌ Avatar Render Error: {e}"
+                "❌ Avatar Render Error: "
+                f"{e}"
             )
 
-    # -----------------------------------------------------
+    # =====================================================
     # USERNAME
-    # -----------------------------------------------------
+    # =====================================================
 
     if settings["show_username"]:
 
-        username = member.display_name
+        try:
 
-        username_size = int(
-            settings["username_size"] or 48
-        )
+            username = (
+                member.display_name
+            )
 
-        username_size = max(
-            12,
-            min(username_size, 300)
-        )
+            username_size = int(
+                settings[
+                    "username_size"
+                ]
+                or 48
+            )
 
-        font = get_font(
-            username_size,
-            bold=True
-        )
+            username_size = max(
+                12,
+                min(
+                    username_size,
+                    500
+                )
+            )
 
-        username_color = safe_color(
-            settings["username_color"],
-            "#FFFFFF"
-        )
+            font = get_font(
+                username_size,
+                bold=True
+            )
 
-        bbox = draw.textbbox(
-            (0, 0),
-            username,
-            font=font
-        )
+            username_color = safe_color(
+                settings[
+                    "username_color"
+                ],
+                "#FFFFFF"
+            )
 
-        text_width = (
-            bbox[2] - bbox[0]
-        )
+            bbox = draw.textbbox(
+                (
+                    0,
+                    0
+                ),
+                username,
+                font=font
+            )
 
-        text_height = (
-            bbox[3] - bbox[1]
-        )
+            text_width = (
+                bbox[2]
+                -
+                bbox[0]
+            )
 
-        username_x = float(
-            settings["username_x"]
-            if settings["username_x"] is not None
-            else 50
-        )
+            text_height = (
+                bbox[3]
+                -
+                bbox[1]
+            )
 
-        username_y = float(
-            settings["username_y"]
-            if settings["username_y"] is not None
-            else 78
-        )
+            username_x = float(
+                settings[
+                    "username_x"
+                ]
+                if settings[
+                    "username_x"
+                ] is not None
+                else 50
+            )
 
-        x = int(
-            width *
-            (username_x / 100)
-            -
-            text_width / 2
-        )
+            username_y = float(
+                settings[
+                    "username_y"
+                ]
+                if settings[
+                    "username_y"
+                ] is not None
+                else 78
+            )
 
-        y = int(
-            height *
-            (username_y / 100)
-            -
-            text_height / 2
-        )
+            x = int(
+                width
+                *
+                (
+                    username_x /
+                    100
+                )
+                -
+                text_width /
+                2
+            )
 
-        # Shadow
-        draw.text(
-            (
-                x + 3,
-                y + 3
-            ),
-            username,
-            font=font,
-            fill="#000000",
-            stroke_width=2,
-            stroke_fill="#000000"
-        )
+            y = int(
+                height
+                *
+                (
+                    username_y /
+                    100
+                )
+                -
+                text_height /
+                2
+            )
 
-        draw.text(
-            (x, y),
-            username,
-            font=font,
-            fill=username_color
-        )
+            # -------------------------------------------------
+            # SHADOW
+            # -------------------------------------------------
 
-    # -----------------------------------------------------
+            draw.text(
+                (
+                    x + 3,
+                    y + 3
+                ),
+                username,
+                font=font,
+                fill="#000000",
+                stroke_width=2,
+                stroke_fill="#000000"
+            )
+
+            # -------------------------------------------------
+            # TEXT
+            # -------------------------------------------------
+
+            draw.text(
+                (
+                    x,
+                    y
+                ),
+                username,
+                font=font,
+                fill=username_color
+            )
+
+        except Exception as e:
+
+            print(
+                "❌ Username Render Error: "
+                f"{e}"
+            )
+
+    # =====================================================
     # MESSAGE
-    # -----------------------------------------------------
+    # =====================================================
 
     message = (
         settings["message"]
-        or "مرحباً {mention} في {server}"
+        or
+        "مرحباً {mention} في {server}"
     )
 
-    message = message.replace(
-        "{user}",
-        member.display_name
-    )
+    replacements = {
 
-    message = message.replace(
-        "{username}",
-        member.display_name
-    )
+        "{user}":
+            member.display_name,
 
-    message = message.replace(
-        "{mention}",
-        member.mention
-    )
+        "{username}":
+            member.display_name,
 
-    message = message.replace(
-        "{server}",
-        member.guild.name
-    )
+        "{mention}":
+            member.mention,
 
-    message = message.replace(
-        "{count}",
-        str(member.guild.member_count)
-    )
+        "{server}":
+            member.guild.name,
 
-    # -----------------------------------------------------
+        "{count}":
+            str(
+                member.guild.member_count
+            ),
+
+        "{id}":
+            str(
+                member.id
+            )
+    }
+
+    for key, value in replacements.items():
+
+        message = message.replace(
+            key,
+            value
+        )
+
+    # =====================================================
     # EXPORT
-    # -----------------------------------------------------
+    # =====================================================
 
     buffer = io.BytesIO()
 
@@ -791,7 +2030,10 @@ def make_welcome_image(
 
     buffer.seek(0)
 
-    return buffer, message
+    return (
+        buffer,
+        message
+    )
 
 
 # =========================================================
@@ -799,21 +2041,51 @@ def make_welcome_image(
 # =========================================================
 
 LOG_TYPES = {
-    "member": "لوق الأعضاء",
-    "role": "لوق الرتب",
-    "message": "لوق الرسائل",
-    "channel": "لوق القنوات",
-    "warning": "لوق التحذيرات",
-    "ticket": "لوق التذاكر",
-    "application": "لوق التقديمات",
-    "moderation": "لوق الإدارة",
-    "suggestion": "لوق الاقتراحات",
-    "notification": "لوق الإشعارات",
-    "voice": "لوق الفويس",
-    "level": "لوق اللفلات",
-    "points": "لوق النقاط"
+
+    "member":
+        "لوق الأعضاء",
+
+    "role":
+        "لوق الرتب",
+
+    "message":
+        "لوق الرسائل",
+
+    "channel":
+        "لوق القنوات",
+
+    "warning":
+        "لوق التحذيرات",
+
+    "ticket":
+        "لوق التذاكر",
+
+    "application":
+        "لوق التقديمات",
+
+    "moderation":
+        "لوق الإدارة",
+
+    "suggestion":
+        "لوق الاقتراحات",
+
+    "notification":
+        "لوق الإشعارات",
+
+    "voice":
+        "لوق الفويس",
+
+    "level":
+        "لوق اللفلات",
+
+    "points":
+        "لوق النقاط"
 }
 
+
+# =========================================================
+# GET LOG CHANNEL
+# =========================================================
 
 async def get_section_log_channel(
     guild: discord.Guild,
@@ -821,6 +2093,7 @@ async def get_section_log_channel(
 ):
 
     if log_type not in LOG_TYPES:
+
         return None
 
     ensure_guild_settings(
@@ -835,12 +2108,15 @@ async def get_section_log_channel(
         FROM log_settings
         WHERE guild_id = ?
         """,
-        (guild.id,)
+        (
+            guild.id,
+        )
     ).fetchone()
 
     con.close()
 
     if not row:
+
         return None
 
     channel_id = row[
@@ -848,6 +2124,7 @@ async def get_section_log_channel(
     ]
 
     if not channel_id:
+
         return None
 
     channel = guild.get_channel(
@@ -855,6 +2132,7 @@ async def get_section_log_channel(
     )
 
     if channel:
+
         return channel
 
     try:
@@ -868,21 +2146,29 @@ async def get_section_log_channel(
         return None
 
 
+# =========================================================
+# SEND LOG
+# =========================================================
+
 async def send_log(
     guild: discord.Guild,
     log_type: str,
     title: str,
     description: str,
     emoji: str = "📋",
-    color: discord.Color = discord.Color.blurple()
+    color: discord.Color =
+        discord.Color.blurple()
 ):
 
-    channel = await get_section_log_channel(
-        guild,
-        log_type
+    channel = (
+        await get_section_log_channel(
+            guild,
+            log_type
+        )
     )
 
     if not channel:
+
         return
 
     embed = discord.Embed(
@@ -933,7 +2219,10 @@ async def get_recent_audit_entry(
 
             if (
                 entry.target
-                and entry.target.id == target_id
+                and
+                entry.target.id
+                ==
+                target_id
             ):
 
                 return entry
@@ -956,6 +2245,7 @@ async def give_auto_role(
 ):
 
     if not role_id:
+
         return
 
     role = member.guild.get_role(
@@ -963,27 +2253,33 @@ async def give_auto_role(
     )
 
     if not role:
+
         return
 
     if role in member.roles:
+
         return
 
     me = member.guild.me
 
     if not me:
+
         return
 
     if not me.guild_permissions.manage_roles:
+
         return
 
     if role >= me.top_role:
+
         return
 
     try:
 
         await member.add_roles(
             role,
-            reason=f"CTRP Auto Role - {role_type}"
+            reason=
+                f"CTRP Auto Role - {role_type}"
         )
 
     except Exception as e:
@@ -998,7 +2294,9 @@ async def give_auto_role(
 # =========================================================
 
 @bot.event
-async def on_member_join(member):
+async def on_member_join(
+    member
+):
 
     # -----------------------------------------------------
     # AUTO ROLE
@@ -1033,9 +2331,14 @@ async def on_member_join(member):
         "member",
         "دخول عضو",
         (
-            f"**العضو:** {member.mention}\n"
-            f"**الاسم:** `{member}`\n"
-            f"**ID:** `{member.id}`"
+            f"**العضو:** "
+            f"{member.mention}\n"
+
+            f"**الاسم:** "
+            f"`{member}`\n"
+
+            f"**ID:** "
+            f"`{member.id}`"
         ),
         "📥",
         discord.Color.green()
@@ -1047,31 +2350,42 @@ async def on_member_join(member):
 
     try:
 
-        welcome = get_welcome_settings(
-            member.guild.id
+        welcome = (
+            get_welcome_settings(
+                member.guild.id
+            )
         )
 
         if not welcome:
+
             return
 
         if not welcome["enabled"]:
+
             return
 
-        channel_id = welcome["channel_id"]
+        channel_id = (
+            welcome["channel_id"]
+        )
 
         if not channel_id:
+
             return
 
-        channel = member.guild.get_channel(
-            int(channel_id)
+        channel = (
+            member.guild.get_channel(
+                int(channel_id)
+            )
         )
 
         if not channel:
 
             try:
 
-                channel = await bot.fetch_channel(
-                    int(channel_id)
+                channel = (
+                    await bot.fetch_channel(
+                        int(channel_id)
+                    )
                 )
 
             except Exception:
@@ -1111,18 +2425,24 @@ async def on_member_join(member):
 
 
 # =========================================================
-# MEMBER LEAVE / KICK
+# MEMBER LEAVE
 # =========================================================
 
 @bot.event
-async def on_member_remove(member):
+async def on_member_remove(
+    member
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        member.guild,
-        discord.AuditLogAction.kick,
-        member.id
+    entry = (
+        await get_recent_audit_entry(
+            member.guild,
+            discord.AuditLogAction.kick,
+            member.id
+        )
     )
 
     if entry:
@@ -1134,10 +2454,18 @@ async def on_member_remove(member):
             "member",
             "طرد عضو",
             (
-                f"**العضو:** `{member}`\n"
-                f"**ID:** `{member.id}`\n"
+                f"**العضو:** "
+                f"`{member}`\n"
+
+                f"**ID:** "
+                f"`{member.id}`\n"
+
                 f"**بواسطة:** "
-                f"{executor.mention if executor else 'غير معروف'}"
+                f"{
+                    executor.mention
+                    if executor
+                    else 'غير معروف'
+                }"
             ),
             "👢",
             discord.Color.orange()
@@ -1150,8 +2478,11 @@ async def on_member_remove(member):
         "member",
         "خروج عضو",
         (
-            f"**العضو:** `{member}`\n"
-            f"**ID:** `{member.id}`"
+            f"**العضو:** "
+            f"`{member}`\n"
+
+            f"**ID:** "
+            f"`{member.id}`"
         ),
         "📤",
         discord.Color.dark_gray()
@@ -1163,14 +2494,21 @@ async def on_member_remove(member):
 # =========================================================
 
 @bot.event
-async def on_member_ban(guild, user):
+async def on_member_ban(
+    guild,
+    user
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        guild,
-        discord.AuditLogAction.ban,
-        user.id
+    entry = (
+        await get_recent_audit_entry(
+            guild,
+            discord.AuditLogAction.ban,
+            user.id
+        )
     )
 
     executor = (
@@ -1181,7 +2519,8 @@ async def on_member_ban(guild, user):
 
     reason = (
         entry.reason
-        if entry and entry.reason
+        if entry
+        and entry.reason
         else "بدون سبب"
     )
 
@@ -1190,11 +2529,21 @@ async def on_member_ban(guild, user):
         "member",
         "حظر عضو",
         (
-            f"**العضو:** {user.mention}\n"
-            f"**ID:** `{user.id}`\n"
+            f"**العضو:** "
+            f"{user.mention}\n"
+
+            f"**ID:** "
+            f"`{user.id}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}\n"
-            f"**السبب:** `{reason}`"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }\n"
+
+            f"**السبب:** "
+            f"`{reason}`"
         ),
         "🔨",
         discord.Color.red()
@@ -1206,17 +2555,22 @@ async def on_member_ban(guild, user):
 # =========================================================
 
 @bot.event
-async def on_message_delete(message):
+async def on_message_delete(
+    message
+):
 
     if not message.guild:
+
         return
 
     if message.author.bot:
+
         return
 
     content = (
         message.content
-        or "لا يوجد محتوى نصي"
+        or
+        "لا يوجد محتوى نصي"
     )
 
     if len(content) > 1000:
@@ -1231,8 +2585,12 @@ async def on_message_delete(message):
         "message",
         "حذف رسالة",
         (
-            f"**العضو:** {message.author.mention}\n"
-            f"**الروم:** {message.channel.mention}\n"
+            f"**العضو:** "
+            f"{message.author.mention}\n"
+
+            f"**الروم:** "
+            f"{message.channel.mention}\n"
+
             f"**الرسالة:**\n"
             f"```{content}```"
         ),
@@ -1252,12 +2610,15 @@ async def on_message_edit(
 ):
 
     if not before.guild:
+
         return
 
     if before.author.bot:
+
         return
 
     if before.content == after.content:
+
         return
 
     old_content = (
@@ -1289,10 +2650,15 @@ async def on_message_edit(
         "message",
         "تعديل رسالة",
         (
-            f"**العضو:** {before.author.mention}\n"
-            f"**الروم:** {before.channel.mention}\n\n"
+            f"**العضو:** "
+            f"{before.author.mention}\n"
+
+            f"**الروم:** "
+            f"{before.channel.mention}\n\n"
+
             f"**قبل:**\n"
             f"```{old_content}```\n"
+
             f"**بعد:**\n"
             f"```{new_content}```"
         ),
@@ -1306,14 +2672,20 @@ async def on_message_edit(
 # =========================================================
 
 @bot.event
-async def on_guild_channel_create(channel):
+async def on_guild_channel_create(
+    channel
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        channel.guild,
-        discord.AuditLogAction.channel_create,
-        channel.id
+    entry = (
+        await get_recent_audit_entry(
+            channel.guild,
+            discord.AuditLogAction.channel_create,
+            channel.id
+        )
     )
 
     executor = (
@@ -1327,10 +2699,18 @@ async def on_guild_channel_create(channel):
         "channel",
         "إنشاء روم",
         (
-            f"**الروم:** {channel.mention}\n"
-            f"**الاسم:** `{channel.name}`\n"
+            f"**الروم:** "
+            f"{channel.mention}\n"
+
+            f"**الاسم:** "
+            f"`{channel.name}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }"
         ),
         "📁",
         discord.Color.green()
@@ -1342,14 +2722,20 @@ async def on_guild_channel_create(channel):
 # =========================================================
 
 @bot.event
-async def on_guild_channel_delete(channel):
+async def on_guild_channel_delete(
+    channel
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        channel.guild,
-        discord.AuditLogAction.channel_delete,
-        channel.id
+    entry = (
+        await get_recent_audit_entry(
+            channel.guild,
+            discord.AuditLogAction.channel_delete,
+            channel.id
+        )
     )
 
     executor = (
@@ -1363,10 +2749,18 @@ async def on_guild_channel_delete(channel):
         "channel",
         "حذف روم",
         (
-            f"**الروم:** `#{channel.name}`\n"
-            f"**ID:** `{channel.id}`\n"
+            f"**الروم:** "
+            f"`#{channel.name}`\n"
+
+            f"**ID:** "
+            f"`{channel.id}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }"
         ),
         "🗑️",
         discord.Color.red()
@@ -1378,14 +2772,20 @@ async def on_guild_channel_delete(channel):
 # =========================================================
 
 @bot.event
-async def on_guild_role_create(role):
+async def on_guild_role_create(
+    role
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        role.guild,
-        discord.AuditLogAction.role_create,
-        role.id
+    entry = (
+        await get_recent_audit_entry(
+            role.guild,
+            discord.AuditLogAction.role_create,
+            role.id
+        )
     )
 
     executor = (
@@ -1399,10 +2799,18 @@ async def on_guild_role_create(role):
         "role",
         "إنشاء رتبة",
         (
-            f"**الرتبة:** {role.mention}\n"
-            f"**الاسم:** `{role.name}`\n"
+            f"**الرتبة:** "
+            f"{role.mention}\n"
+
+            f"**الاسم:** "
+            f"`{role.name}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }"
         ),
         "🏷️",
         discord.Color.green()
@@ -1414,14 +2822,20 @@ async def on_guild_role_create(role):
 # =========================================================
 
 @bot.event
-async def on_guild_role_delete(role):
+async def on_guild_role_delete(
+    role
+):
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        role.guild,
-        discord.AuditLogAction.role_delete,
-        role.id
+    entry = (
+        await get_recent_audit_entry(
+            role.guild,
+            discord.AuditLogAction.role_delete,
+            role.id
+        )
     )
 
     executor = (
@@ -1435,10 +2849,18 @@ async def on_guild_role_delete(role):
         "role",
         "حذف رتبة",
         (
-            f"**الرتبة:** `{role.name}`\n"
-            f"**ID:** `{role.id}`\n"
+            f"**الرتبة:** "
+            f"`{role.name}`\n"
+
+            f"**ID:** "
+            f"`{role.id}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }"
         ),
         "🗑️",
         discord.Color.red()
@@ -1456,14 +2878,19 @@ async def on_guild_role_update(
 ):
 
     if before.name == after.name:
+
         return
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        after.guild,
-        discord.AuditLogAction.role_update,
-        after.id
+    entry = (
+        await get_recent_audit_entry(
+            after.guild,
+            discord.AuditLogAction.role_update,
+            after.id
+        )
     )
 
     executor = (
@@ -1477,10 +2904,18 @@ async def on_guild_role_update(
         "role",
         "تعديل رتبة",
         (
-            f"**قبل:** `{before.name}`\n"
-            f"**بعد:** `{after.name}`\n"
+            f"**قبل:** "
+            f"`{before.name}`\n"
+
+            f"**بعد:** "
+            f"`{after.name}`\n"
+
             f"**بواسطة:** "
-            f"{executor.mention if executor else 'غير معروف'}"
+            f"{
+                executor.mention
+                if executor
+                else 'غير معروف'
+            }"
         ),
         "✏️",
         discord.Color.orange()
@@ -1488,7 +2923,7 @@ async def on_guild_role_update(
 
 
 # =========================================================
-# MEMBER ROLE ADD / REMOVE
+# MEMBER ROLE UPDATE
 # =========================================================
 
 @bot.event
@@ -1507,23 +2942,30 @@ async def on_member_update(
 
     added = (
         after_roles
-        - before_roles
+        -
+        before_roles
     )
 
     removed = (
         before_roles
-        - after_roles
+        -
+        after_roles
     )
 
     if not added and not removed:
+
         return
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(
+        1
+    )
 
-    entry = await get_recent_audit_entry(
-        after.guild,
-        discord.AuditLogAction.member_role_update,
-        after.id
+    entry = (
+        await get_recent_audit_entry(
+            after.guild,
+            discord.AuditLogAction.member_role_update,
+            after.id
+        )
     )
 
     executor = (
@@ -1541,6 +2983,7 @@ async def on_member_update(
     for role in added:
 
         if role.is_default():
+
             continue
 
         await send_log(
@@ -1548,9 +2991,14 @@ async def on_member_update(
             "role",
             "إعطاء رتبة",
             (
-                f"**العضو:** {after.mention}\n"
-                f"**الرتبة:** {role.mention}\n"
-                f"**بواسطة:** {executor_text}"
+                f"**العضو:** "
+                f"{after.mention}\n"
+
+                f"**الرتبة:** "
+                f"{role.mention}\n"
+
+                f"**بواسطة:** "
+                f"{executor_text}"
             ),
             "➕",
             discord.Color.green()
@@ -1559,6 +3007,7 @@ async def on_member_update(
     for role in removed:
 
         if role.is_default():
+
             continue
 
         await send_log(
@@ -1566,9 +3015,14 @@ async def on_member_update(
             "role",
             "سحب رتبة",
             (
-                f"**العضو:** {after.mention}\n"
-                f"**الرتبة:** {role.mention}\n"
-                f"**بواسطة:** {executor_text}"
+                f"**العضو:** "
+                f"{after.mention}\n"
+
+                f"**الرتبة:** "
+                f"{role.mention}\n"
+
+                f"**بواسطة:** "
+                f"{executor_text}"
             ),
             "➖",
             discord.Color.red()
@@ -1583,15 +3037,21 @@ class LogChannelSelect(
     discord.ui.ChannelSelect
 ):
 
-    def __init__(self, log_type):
+    def __init__(
+        self,
+        log_type
+    ):
 
         self.log_type = log_type
 
         super().__init__(
-            placeholder="اختر روم اللوق",
+            placeholder=
+                "اختر روم اللوق",
+
             channel_types=[
                 discord.ChannelType.text
             ],
+
             min_values=1,
             max_values=1
         )
@@ -1634,7 +3094,10 @@ class LogChannelView(
     discord.ui.View
 ):
 
-    def __init__(self, log_type):
+    def __init__(
+        self,
+        log_type
+    ):
 
         super().__init__(
             timeout=60
@@ -1670,9 +3133,12 @@ class LogTypeSelect(
             )
 
         super().__init__(
-            placeholder="اختر نوع اللوق",
+            placeholder=
+                "اختر نوع اللوق",
+
             min_values=1,
             max_values=1,
+
             options=options
         )
 
@@ -1686,9 +3152,11 @@ class LogTypeSelect(
         await interaction.response.send_message(
             f"اختر روم "
             f"{LOG_TYPES[log_type]}:",
+
             view=LogChannelView(
                 log_type
             ),
+
             ephemeral=True
         )
 
@@ -1724,7 +3192,9 @@ class AutoRoleSelect(
         self.role_type = role_type
 
         super().__init__(
-            placeholder="اختر الرتبة",
+            placeholder=
+                "اختر الرتبة",
+
             min_values=1,
             max_values=1
         )
@@ -1817,10 +3287,13 @@ class WelcomeChannelSelect(
     def __init__(self):
 
         super().__init__(
-            placeholder="اختر روم الترحيب",
+            placeholder=
+                "اختر روم الترحيب",
+
             channel_types=[
                 discord.ChannelType.text
             ],
+
             min_values=1,
             max_values=1
         )
@@ -1879,12 +3352,15 @@ class WelcomeChannelView(
 
 @bot.tree.command(
     name="تحديد_اللوق",
-    description="تحديد روم لقسم من أقسام اللوق"
+    description=
+        "تحديد روم لقسم من أقسام اللوق"
 )
 @app_commands.checks.has_permissions(
     administrator=True
 )
-async def set_log(interaction):
+async def set_log(
+    interaction
+):
 
     await interaction.response.send_message(
         "اختر قسم اللوق الذي تريد تحديده:",
@@ -1895,7 +3371,8 @@ async def set_log(interaction):
 
 @bot.tree.command(
     name="رتبة_تلقائية_عضو",
-    description="تحديد الرتبة التلقائية للأعضاء"
+    description=
+        "تحديد الرتبة التلقائية للأعضاء"
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -1906,14 +3383,17 @@ async def auto_member_role(
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها العضو تلقائيًا:",
-        view=AutoRoleView("member"),
+        view=AutoRoleView(
+            "member"
+        ),
         ephemeral=True
     )
 
 
 @bot.tree.command(
     name="رتبة_تلقائية_بوت",
-    description="تحديد الرتبة التلقائية للبوتات"
+    description=
+        "تحديد الرتبة التلقائية للبوتات"
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -1924,14 +3404,17 @@ async def auto_bot_role(
 
     await interaction.response.send_message(
         "اختر الرتبة التي يأخذها البوت تلقائيًا:",
-        view=AutoRoleView("bot"),
+        view=AutoRoleView(
+            "bot"
+        ),
         ephemeral=True
     )
 
 
 @bot.tree.command(
     name="اعدادات_اللوق",
-    description="عرض إعدادات اللوقات"
+    description=
+        "عرض إعدادات اللوقات"
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -1952,7 +3435,9 @@ async def log_settings(
         FROM log_settings
         WHERE guild_id = ?
         """,
-        (interaction.guild.id,)
+        (
+            interaction.guild.id,
+        )
     ).fetchone()
 
     con.close()
@@ -1993,12 +3478,13 @@ async def log_settings(
 
 
 # =========================================================
-# WELCOME COMMAND
+# WELCOME CHANNEL
 # =========================================================
 
 @bot.tree.command(
     name="تحديد_روم_الترحيب",
-    description="تحديد الروم الذي ترسل فيه الترحيبات"
+    description=
+        "تحديد الروم الذي ترسل فيه الترحيبات"
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -2014,19 +3500,27 @@ async def set_welcome_channel(
     )
 
 
+# =========================================================
+# WELCOME TOGGLE
+# =========================================================
+
 @bot.tree.command(
     name="الترحيب",
-    description="تشغيل أو إيقاف نظام الترحيب"
+    description=
+        "تشغيل أو إيقاف نظام الترحيب"
 )
 @app_commands.describe(
-    الحالة="تشغيل أو إيقاف الترحيب"
+    الحالة=
+        "تشغيل أو إيقاف الترحيب"
 )
 @app_commands.choices(
     الحالة=[
+
         app_commands.Choice(
             name="تشغيل",
             value="on"
         ),
+
         app_commands.Choice(
             name="إيقاف",
             value="off"
@@ -2038,7 +3532,8 @@ async def set_welcome_channel(
 )
 async def welcome_toggle(
     interaction,
-    الحالة: app_commands.Choice[str]
+    الحالة:
+        app_commands.Choice[str]
 ):
 
     ensure_welcome_settings(
@@ -2081,9 +3576,14 @@ async def welcome_toggle(
     )
 
 
+# =========================================================
+# WELCOME SETTINGS
+# =========================================================
+
 @bot.tree.command(
     name="اعدادات_الترحيب",
-    description="عرض إعدادات الترحيب الحالية"
+    description=
+        "عرض إعدادات الترحيب الحالية"
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -2102,7 +3602,9 @@ async def welcome_settings_command(
 
         channel = (
             interaction.guild.get_channel(
-                int(row["channel_id"])
+                int(
+                    row["channel_id"]
+                )
             )
         )
 
@@ -2161,6 +3663,22 @@ async def welcome_settings_command(
         inline=True
     )
 
+    embed.add_field(
+        name="حجم الصورة",
+        value=(
+            f"`{row['avatar_size']}`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="شكل الصورة",
+        value=(
+            f"`{row['avatar_shape']}`"
+        ),
+        inline=True
+    )
+
     await interaction.response.send_message(
         embed=embed,
         ephemeral=True
@@ -2192,10 +3710,15 @@ def prepare_warning_ids():
 
         last_warning_id[
             row["guild_id"]
-        ] = row["max_id"] or 0
+        ] = (
+            row["max_id"]
+            or 0
+        )
 
 
-@tasks.loop(seconds=5)
+@tasks.loop(
+    seconds=5
+)
 async def warning_watcher_task():
 
     try:
@@ -2203,7 +3726,9 @@ async def warning_watcher_task():
         con = db()
 
         minimum_id = (
-            min(last_warning_id.values())
+            min(
+                last_warning_id.values()
+            )
             if last_warning_id
             else 0
         )
@@ -2215,23 +3740,32 @@ async def warning_watcher_task():
             WHERE id > ?
             ORDER BY id ASC
             """,
-            (minimum_id,)
+            (
+                minimum_id,
+            )
         ).fetchall()
 
         con.close()
 
         for row in rows:
 
-            guild_id = row["guild_id"]
+            guild_id = (
+                row["guild_id"]
+            )
 
-            warning_id = row["id"]
+            warning_id = (
+                row["id"]
+            )
 
-            old_id = last_warning_id.get(
-                guild_id,
-                0
+            old_id = (
+                last_warning_id.get(
+                    guild_id,
+                    0
+                )
             )
 
             if warning_id <= old_id:
+
                 continue
 
             last_warning_id[
@@ -2243,6 +3777,7 @@ async def warning_watcher_task():
             )
 
             if not guild:
+
                 continue
 
             user = guild.get_member(
@@ -2256,13 +3791,15 @@ async def warning_watcher_task():
             user_text = (
                 user.mention
                 if user
-                else f"`{row['user_id']}`"
+                else
+                f"`{row['user_id']}`"
             )
 
             moderator_text = (
                 moderator.mention
                 if moderator
-                else f"`{row['moderator_id']}`"
+                else
+                f"`{row['moderator_id']}`"
             )
 
             await send_log(
@@ -2270,8 +3807,12 @@ async def warning_watcher_task():
                 "warning",
                 "تحذير عضو",
                 (
-                    f"**العضو:** {user_text}\n"
-                    f"**بواسطة:** {moderator_text}\n"
+                    f"**العضو:** "
+                    f"{user_text}\n"
+
+                    f"**بواسطة:** "
+                    f"{moderator_text}\n"
+
                     f"**السبب:** "
                     f"`{row['reason'] or 'بدون سبب'}`"
                 ),
@@ -2312,10 +3853,14 @@ async def load_systems():
         systems_folder
     ):
 
-        if not filename.endswith(".py"):
+        if not filename.endswith(
+            ".py"
+        ):
+
             continue
 
         if filename == "__init__.py":
+
             continue
 
         module_name = filename[:-3]
@@ -2353,7 +3898,9 @@ async def load_systems():
 @bot.event
 async def on_ready():
 
-    print("━━━━━━━━━━━━━━━━━━━━")
+    print(
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
 
     print(
         f"🤖 Bot: {bot.user}"
@@ -2363,7 +3910,17 @@ async def on_ready():
         "🟢 CTRP System Online"
     )
 
-    print("━━━━━━━━━━━━━━━━━━━━")
+    print(
+        "👋 Welcome System Ready"
+    )
+
+    print(
+        "🌐 Welcome API Ready"
+    )
+
+    print(
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
 
     try:
 
