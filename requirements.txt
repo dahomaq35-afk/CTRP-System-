@@ -1,4 +1,4 @@
+discord.py==2.7.1
 Flask
-discord.py
 requests
 Pillow
