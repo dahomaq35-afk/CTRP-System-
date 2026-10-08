@@ -252,6 +252,145 @@ class Notifications(
 
 
     # =====================================================
+    # MEMBER JOIN
+    # =====================================================
+
+    @commands.Cog.listener()
+    async def on_member_join(
+        self,
+        member
+    ):
+
+        try:
+
+            settings = get_welcome_settings(
+                member.guild.id
+            )
+
+            if not settings:
+
+                return
+
+            if not settings["enabled"]:
+
+                return
+
+            if not settings["channel_id"]:
+
+                return
+
+            channel = (
+                member.guild.get_channel(
+                    settings["channel_id"]
+                )
+            )
+
+            if channel is None:
+
+                try:
+
+                    channel = (
+                        await self.bot.fetch_channel(
+                            settings["channel_id"]
+                        )
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "❌ Welcome Channel Error: "
+                        f"{e}"
+                    )
+
+                    return
+
+            if not isinstance(
+                channel,
+                discord.TextChannel
+            ):
+
+                return
+
+            message = (
+                replace_welcome_variables(
+                    settings["message"],
+                    member
+                )
+            )
+
+            embed = discord.Embed(
+
+                description=message,
+
+                color=settings["color"]
+            )
+
+            try:
+
+                embed.set_thumbnail(
+                    url=(
+                        member
+                        .display_avatar
+                        .url
+                    )
+                )
+
+            except Exception:
+
+                pass
+
+            footer = (
+                settings["footer"]
+            )
+
+            if footer:
+
+                footer = (
+                    replace_welcome_variables(
+                        footer,
+                        member
+                    )
+                )
+
+                embed.set_footer(
+                    text=footer
+                )
+
+            if settings["image_url"]:
+
+                embed.set_image(
+                    url=settings["image_url"]
+                )
+
+            await channel.send(
+
+                content=member.mention,
+
+                embed=embed,
+
+                allowed_mentions=
+                    discord.AllowedMentions(
+                        users=True,
+                        roles=False,
+                        everyone=False
+                    )
+            )
+
+        except discord.Forbidden:
+
+            print(
+                "❌ Welcome Error: "
+                "البوت لا يملك صلاحية الإرسال في روم الترحيب."
+            )
+
+        except Exception as e:
+
+            print(
+                f"❌ Welcome Error: {e}"
+            )
+
+
+    # =====================================================
     # STREAM NOTIFICATIONS
     # =====================================================
 
@@ -261,24 +400,6 @@ class Notifications(
     async def check_streams(
         self
     ):
-
-        # =================================================
-        # TWITCH / KICK / YOUTUBE / TIKTOK
-        # =================================================
-        #
-        # مكان ربط APIs مستقبلًا.
-        #
-        # سيتم فحص الحسابات الموجودة في:
-        #
-        # streamers
-        #
-        # وإرسال إشعار عند وجود:
-        #
-        # - بث جديد
-        # - فيديو جديد
-        # - محتوى جديد
-        #
-        # =================================================
 
         try:
 
@@ -300,14 +421,11 @@ class Notifications(
 
             con.close()
 
-            # =============================================
-            # حاليًا لا يوجد API مربوط
-            # =============================================
-
             for row in rows:
 
-                # سيتم استخدام البيانات لاحقًا
-                # عند إضافة APIs.
+                # =========================================
+                # مكان ربط APIs مستقبلًا
+                # =========================================
 
                 continue
 
@@ -640,7 +758,6 @@ class Notifications(
 
             return await interaction.response.send_message(
                 "❌ لم يتم إعداد نظام الترحيب.",
-
                 ephemeral=True
             )
 
@@ -648,7 +765,6 @@ class Notifications(
 
             return await interaction.response.send_message(
                 "❌ لم يتم تحديد روم الترحيب.",
-
                 ephemeral=True
             )
 
@@ -672,7 +788,6 @@ class Notifications(
 
                 return await interaction.response.send_message(
                     "❌ روم الترحيب غير موجود.",
-
                     ephemeral=True
                 )
 
@@ -683,7 +798,6 @@ class Notifications(
 
             return await interaction.response.send_message(
                 "❌ الروم المحدد ليس رومًا نصيًا.",
-
                 ephemeral=True
             )
 
