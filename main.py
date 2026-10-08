@@ -30,7 +30,6 @@ from discord.ext import commands, tasks
 
 from database import init_db
 
-
 # =========================================================
 # DATABASE
 # =========================================================
@@ -947,7 +946,6 @@ intents.members = True
 intents.message_content = True
 intents.voice_states = True
 intents.presences = True
-
 
 bot = commands.Bot(
     command_prefix="!",
@@ -2358,9 +2356,21 @@ async def on_member_join(
 
         if not welcome:
 
+            print(
+                f"⚠️ Welcome: "
+                f"لا توجد إعدادات "
+                f"[{member.guild.name}]"
+            )
+
             return
 
         if not welcome["enabled"]:
+
+            print(
+                f"⚠️ Welcome: "
+                f"النظام متوقف "
+                f"[{member.guild.name}]"
+            )
 
             return
 
@@ -2369,6 +2379,12 @@ async def on_member_join(
         )
 
         if not channel_id:
+
+            print(
+                f"⚠️ Welcome: "
+                f"لم يتم تحديد روم "
+                f"[{member.guild.name}]"
+            )
 
             return
 
@@ -2388,9 +2404,65 @@ async def on_member_join(
                     )
                 )
 
-            except Exception:
+            except Exception as e:
+
+                print(
+                    f"❌ Welcome Channel Error "
+                    f"[{member.guild.name}]: {e}"
+                )
 
                 return
+
+        if not isinstance(
+            channel,
+            discord.TextChannel
+        ):
+
+            print(
+                f"❌ Welcome: "
+                f"الروم المحدد ليس Text Channel "
+                f"[{member.guild.name}]"
+            )
+
+            return
+
+        me = member.guild.me
+
+        if not me:
+
+            print(
+                f"❌ Welcome: "
+                f"لم يتم العثور على البوت "
+                f"[{member.guild.name}]"
+            )
+
+            return
+
+        permissions = (
+            channel.permissions_for(
+                me
+            )
+        )
+
+        if not permissions.send_messages:
+
+            print(
+                f"❌ Welcome: "
+                f"البوت لا يستطيع إرسال رسائل "
+                f"#{channel.name}"
+            )
+
+            return
+
+        if not permissions.attach_files:
+
+            print(
+                f"❌ Welcome: "
+                f"البوت لا يستطيع رفع الملفات "
+                f"#{channel.name}"
+            )
+
+            return
 
         image_buffer, message = (
             await asyncio.to_thread(
@@ -2407,13 +2479,19 @@ async def on_member_join(
 
         await channel.send(
             content=message,
-            file=file
+            file=file,
+            allowed_mentions=discord.AllowedMentions(
+                users=True,
+                roles=False,
+                everyone=False
+            )
         )
 
         print(
             f"👋 Welcome sent: "
             f"{member} -> "
-            f"{member.guild.name}"
+            f"{member.guild.name} -> "
+            f"#{channel.name}"
         )
 
     except Exception as e:
@@ -3908,6 +3986,11 @@ async def on_ready():
 
     print(
         "🟢 CTRP System Online"
+    )
+
+    print(
+        f"👥 Members Intent: "
+        f"{bot.intents.members}"
     )
 
     print(
