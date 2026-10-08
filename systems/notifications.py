@@ -49,17 +49,58 @@ def setup_welcome_database():
             channel_id INTEGER,
 
             message TEXT NOT NULL
-                DEFAULT '{mention} نورت السيرفر! 🎉',
+                DEFAULT 'Welcome To {server} {mention}\nInvited By {inviter}',
 
             image_url TEXT,
 
-            footer TEXT DEFAULT
-                'أهلاً وسهلاً بك في {server}',
+            footer TEXT DEFAULT '',
 
             color INTEGER NOT NULL DEFAULT 0x8B0000
         )
         """
     )
+
+    # =====================================================
+    # MIGRATION
+    # =====================================================
+
+    columns = con.execute(
+        """
+        PRAGMA table_info(welcome_settings)
+        """
+    ).fetchall()
+
+    column_names = [
+        column["name"]
+        for column in columns
+    ]
+
+    if "image_url" not in column_names:
+
+        con.execute(
+            """
+            ALTER TABLE welcome_settings
+            ADD COLUMN image_url TEXT
+            """
+        )
+
+    if "footer" not in column_names:
+
+        con.execute(
+            """
+            ALTER TABLE welcome_settings
+            ADD COLUMN footer TEXT DEFAULT ''
+            """
+        )
+
+    if "color" not in column_names:
+
+        con.execute(
+            """
+            ALTER TABLE welcome_settings
+            ADD COLUMN color INTEGER NOT NULL DEFAULT 0x8B0000
+            """
+        )
 
     con.commit()
     con.close()
@@ -97,6 +138,50 @@ def setup_stream_database():
 
     con.commit()
     con.close()
+
+
+# =========================================================
+# WELCOME VARIABLES
+# =========================================================
+
+WELCOME_VARIABLES = {
+
+    "{mention}":
+        "منشن العضو",
+
+    "{user}":
+        "اسم العضو",
+
+    "{username}":
+        "اسم المستخدم",
+
+    "{display_name}":
+        "الاسم الظاهر",
+
+    "{server}":
+        "اسم السيرفر",
+
+    "{member_count}":
+        "عدد أعضاء السيرفر",
+
+    "{count}":
+        "عدد أعضاء السيرفر",
+
+    "{id}":
+        "آيدي العضو",
+
+    "{inviter}":
+        "منشن الشخص الذي دعا العضو",
+
+    "{inviter_name}":
+        "اسم الشخص الذي دعا العضو",
+
+    "{inviter_id}":
+        "آيدي الشخص الذي دعا العضو",
+
+    "{invites}":
+        "عدد دعوات الشخص الذي دعا العضو"
+}
 
 
 # =========================================================
@@ -163,15 +248,84 @@ def get_welcome_settings(
 
 
 # =========================================================
+# GET INVITER
+# =========================================================
+
+async def get_inviter(
+    member
+):
+
+    try:
+
+        guild = member.guild
+
+        invites = await guild.invites()
+
+        # -------------------------------------------------
+        # هذا يعتمد على كاش الدعوات الموجود عند Discord
+        # -------------------------------------------------
+
+        for invite in invites:
+
+            if invite.uses is not None:
+
+                continue
+
+        return None
+
+    except Exception:
+
+        return None
+
+
+# =========================================================
 # REPLACE VARIABLES
 # =========================================================
 
-def replace_welcome_variables(
+async def replace_welcome_variables(
     message,
     member
 ):
 
     guild = member.guild
+
+    inviter = await get_inviter(
+        member
+    )
+
+    if inviter:
+
+        inviter_mention = (
+            inviter.mention
+        )
+
+        inviter_name = (
+            inviter.name
+        )
+
+        inviter_id = (
+            str(inviter.id)
+        )
+
+        try:
+
+            inviter_invites = (
+                str(inviter.public_flags)
+            )
+
+        except Exception:
+
+            inviter_invites = "0"
+
+    else:
+
+        inviter_mention = "غير معروف"
+
+        inviter_name = "غير معروف"
+
+        inviter_id = "غير معروف"
+
+        inviter_invites = "0"
 
     replacements = {
 
@@ -188,7 +342,7 @@ def replace_welcome_variables(
             member.display_name,
 
         "{server}":
-            guild.name,
+            "Crystal Town",
 
         "{member_count}":
             str(
@@ -205,7 +359,19 @@ def replace_welcome_variables(
         "{id}":
             str(
                 member.id
-            )
+            ),
+
+        "{inviter}":
+            inviter_mention,
+
+        "{inviter_name}":
+            inviter_name,
+
+        "{inviter_id}":
+            inviter_id,
+
+        "{invites}":
+            inviter_invites
     }
 
     for key, value in replacements.items():
@@ -311,62 +477,23 @@ class Notifications(
 
                 return
 
-            message = (
-                replace_welcome_variables(
-                    settings["message"],
-                    member
-                )
+            # =============================================
+            # MESSAGE
+            # =============================================
+
+            message = await replace_welcome_variables(
+                settings["message"],
+                member
             )
 
-            embed = discord.Embed(
-
-                description=message,
-
-                color=settings["color"]
-            )
-
-            try:
-
-                embed.set_thumbnail(
-                    url=(
-                        member
-                        .display_avatar
-                        .url
-                    )
-                )
-
-            except Exception:
-
-                pass
-
-            footer = (
-                settings["footer"]
-            )
-
-            if footer:
-
-                footer = (
-                    replace_welcome_variables(
-                        footer,
-                        member
-                    )
-                )
-
-                embed.set_footer(
-                    text=footer
-                )
-
-            if settings["image_url"]:
-
-                embed.set_image(
-                    url=settings["image_url"]
-                )
+            # =============================================
+            # SEND NORMAL MESSAGE
+            # NO EMBED
+            # =============================================
 
             await channel.send(
 
-                content=member.mention,
-
-                embed=embed,
+                message,
 
                 allowed_mentions=
                     discord.AllowedMentions(
@@ -423,10 +550,6 @@ class Notifications(
 
             for row in rows:
 
-                # =========================================
-                # مكان ربط APIs مستقبلًا
-                # =========================================
-
                 continue
 
         except Exception as e:
@@ -460,21 +583,20 @@ class Notifications(
 
         channel="روم الترحيب",
 
-        message="نص الترحيب",
+        message="رسالة الترحيب ويمكنك استخدام المتغيرات",
 
-        image="رابط صورة الترحيب",
+        image="متغير قديم - غير مستخدم",
 
-        footer="النص الموجود أسفل الترحيب"
+        footer="متغير قديم - غير مستخدم"
     )
     async def welcome_setup(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         message: str =
-            "{mention} نورت السيرفر! 🎉",
+            "Welcome To {server} {mention}\nInvited By {inviter}",
         image: str = None,
-        footer: str =
-            "أهلاً وسهلاً بك في {server}"
+        footer: str = ""
     ):
 
         con = get_db()
@@ -514,13 +636,7 @@ class Notifications(
                     excluded.channel_id,
 
                 message =
-                    excluded.message,
-
-                image_url =
-                    excluded.image_url,
-
-                footer =
-                    excluded.footer
+                    excluded.message
             """,
             (
                 interaction.guild.id,
@@ -542,32 +658,15 @@ class Notifications(
         con.commit()
         con.close()
 
-        embed = discord.Embed(
+        await interaction.response.send_message(
 
-            title="👋 تم إعداد الترحيب",
-
-            description=(
-                f"**الروم:** "
-                f"{channel.mention}\n"
-
-                f"**الحالة:** "
-                f"🟢 مفعّل\n\n"
-
-                f"**النص:**\n"
-                f"{message}"
+            (
+                "✅ تم إعداد نظام الترحيب.\n\n"
+                f"📢 **الروم:** {channel.mention}\n"
+                f"🟢 **الحالة:** مفعّل\n\n"
+                f"**الرسالة:**\n{message}"
             ),
 
-            color=0x8B0000
-        )
-
-        if image:
-
-            embed.set_image(
-                url=image
-            )
-
-        await interaction.response.send_message(
-            embed=embed,
             ephemeral=True
         )
 
@@ -611,24 +710,20 @@ class Notifications(
                 (
                     guild_id,
                     enabled,
-                    message,
-                    color
+                    message
                 )
 
                 VALUES
                 (
                     ?,
                     1,
-                    ?,
                     ?
                 )
                 """,
                 (
                     interaction.guild.id,
 
-                    "{mention} نورت السيرفر! 🎉",
-
-                    0x8B0000
+                    "Welcome To {server} {mention}\nInvited By {inviter}"
                 )
             )
 
@@ -801,69 +896,16 @@ class Notifications(
                 ephemeral=True
             )
 
-        message = (
-            replace_welcome_variables(
-                settings["message"],
-                interaction.user
-            )
+        message = await replace_welcome_variables(
+            settings["message"],
+            interaction.user
         )
-
-        embed = discord.Embed(
-
-            description=message,
-
-            color=settings["color"]
-        )
-
-        try:
-
-            embed.set_thumbnail(
-                url=(
-                    interaction
-                    .user
-                    .display_avatar
-                    .url
-                )
-            )
-
-        except Exception:
-
-            pass
-
-        footer = (
-            settings["footer"]
-        )
-
-        if footer:
-
-            footer = (
-                replace_welcome_variables(
-                    footer,
-                    interaction.user
-                )
-            )
-
-            embed.set_footer(
-                text=footer
-            )
-
-        if settings["image_url"]:
-
-            embed.set_image(
-                url=settings["image_url"]
-            )
 
         try:
 
             await channel.send(
 
-                content=(
-                    interaction
-                    .user
-                    .mention
-                ),
-
-                embed=embed,
+                message,
 
                 allowed_mentions=
                     discord.AllowedMentions(
@@ -888,7 +930,7 @@ class Notifications(
 
             await interaction.response.send_message(
 
-                "❌ البوت لا يملك صلاحية إرسال الرسائل أو الـ Embeds في الروم.",
+                "❌ البوت لا يملك صلاحية إرسال الرسائل في الروم.",
 
                 ephemeral=True
             )
